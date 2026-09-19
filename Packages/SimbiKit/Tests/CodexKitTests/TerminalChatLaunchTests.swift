@@ -82,6 +82,16 @@ struct TerminalChatLaunchTests {
         #expect(text.contains("files/slides.pdf"))
     }
 
+    @Test("default instructions refresh converted context on every turn")
+    func instructionsRefreshLiveContext() throws {
+        let temp = try makeNote(files: ["note.md": "hello"])
+        defer { temp.cleanup() }
+        let text = TerminalChatLaunch.developerInstructions(
+            noteFolderURL: temp.note, homeRootURL: temp.home)
+        #expect(text.contains("Before every answer, re-list `context/`"))
+        #expect(text.contains("newly added or changed"))
+    }
+
     @Test("a CHAT.md at the home root replaces the default template")
     func instructionsUseUserTemplate() throws {
         let temp = try makeNote(files: ["note.md": "hi"])
@@ -90,7 +100,10 @@ struct TerminalChatLaunchTests {
             to: temp.home.appending(path: "CHAT.md"), atomically: true, encoding: .utf8)
         let text = TerminalChatLaunch.developerInstructions(
             noteFolderURL: temp.note, homeRootURL: temp.home)
-        #expect(text == "You are helping with `Work/Standup`. The note currently contains: `note.md`.")
+        #expect(
+            text.hasPrefix(
+                "You are helping with `Work/Standup`. The note currently contains: `note.md`."))
+        #expect(text.contains("Before every answer, re-list `context/`"))
     }
 
     @Test("instructions say so when the note has no files yet")
