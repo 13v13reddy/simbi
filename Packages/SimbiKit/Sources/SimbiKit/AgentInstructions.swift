@@ -266,7 +266,7 @@ public enum AgentInstructions: String, CaseIterable, Identifiable, Sendable {
 
         Rules:
         - 2 to 6 words, plain text: no quotes, no trailing period, no date, \
-        no "Meeting about" filler.
+        no "Meeting about" filler. Simbi adds the note date as a prefix.
         - Name the concrete subject, not the format: "Q3 Budget Review", not \
         "Team Meeting Notes".
         - The title becomes a folder name, so never use "/" or ":".
