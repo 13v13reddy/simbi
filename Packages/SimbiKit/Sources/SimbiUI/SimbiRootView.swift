@@ -117,6 +117,8 @@ public struct SimbiRootView: View {
         }
         .task {
             model.start()
+            LaunchAtLogin.apply(
+                enabled: SimbiSettings.current(home: model.home).launchAtLogin)
             // Load the diarizer + VAD models now so Record never waits on
             // them (screenshot mode stays offline).
             if !Flags.uiPreview {
@@ -231,24 +233,35 @@ private struct SidebarScrollProbe: NSViewRepresentable {
 private struct CodexStatusFooter: View {
     var body: some View {
         let available = CodexSetupModel.shared.state == .connected
-        Button {
-            CodexStatusWindowManager.shared.open()
-        } label: {
-            HStack(spacing: Design.iconGap) {
-                StatusDot(color: available ? .statusOK : .statusWarning)
-                Text(available ? "Codex connected" : "Codex unavailable: transcription off")
-                    .font(.meta)
-                    .foregroundStyle(
-                        available ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.statusWarning)
-                    )
-                    .lineLimit(1)
+        HStack(spacing: 0) {
+            Button {
+                CodexStatusWindowManager.shared.open()
+            } label: {
+                HStack(spacing: Design.iconGap) {
+                    StatusDot(color: available ? .statusOK : .statusWarning)
+                    Text(available ? "Codex connected" : "Codex unavailable: transcription off")
+                        .font(.meta)
+                        .foregroundStyle(
+                            available ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.statusWarning)
+                        )
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, Design.footerInset)
+                .padding(.vertical, Design.stripPadding)
+                .contentShape(.rect)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, Design.footerInset)
-            .padding(.vertical, Design.stripPadding)
-            .contentShape(.rect)
+            .buttonStyle(.plain)
+            .help("Show Codex account status and usage")
+
+            SettingsLink {
+                Image(systemName: "gearshape")
+                    .accessibilityLabel("Settings")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .padding(.trailing, Design.footerInset)
+            .help("Settings…")
         }
-        .buttonStyle(.plain)
-        .help("Show Codex account status and usage")
     }
 }
