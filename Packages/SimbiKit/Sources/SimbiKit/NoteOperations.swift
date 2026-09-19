@@ -9,7 +9,7 @@ public enum NoteOperationError: Error, Equatable {
 /// Plain file-system operations behind the sidebar's context menu (SPEC.md §6).
 public enum NoteOperations {
     /// Creates a note folder: a plain folder plus the empty `note.md`
-    /// marker that makes it a note. New notes are pinned to the top of the
+    /// marker that makes it a note. New notes are placed at the top of the
     /// parent's sidebar order rather than landing at their alphabetical slot.
     @discardableResult
     public static func createNote(named name: String, in parent: URL) throws -> URL {
