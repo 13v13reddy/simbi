@@ -37,8 +37,8 @@ public final class QuickCaptureModel {
         nodes.filter { $0.kind == .folder }
     }
 
-    /// The common path is one click: keep using the last folder the user
-    /// chose. A single available folder is an obvious first-run default;
+    /// The checked destination in the menubar: keep using the last folder
+    /// chosen. A single available folder is an obvious first-run default;
     /// otherwise the Simbi root remains the safe fallback.
     public var quickStartParent: URL {
         if let lastFolderURL { return lastFolderURL }
@@ -46,13 +46,6 @@ public final class QuickCaptureModel {
             return onlyFolder.url
         }
         return home.rootURL
-    }
-
-    public var quickStartLabel: String {
-        if quickStartParent == home.rootURL {
-            return "Start Recording in Simbi"
-        }
-        return "Start Recording in \(quickStartParent.lastPathComponent)"
     }
 
     private var lastFolderURL: URL? {
@@ -223,15 +216,13 @@ private struct QuickCaptureMenu: View {
                     Button("Stop Recording", systemImage: "stop.circle") {
                         model.stop()
                     }
-                    Button("Open Simbi") { model.openSimbi() }
                 }
             } else {
                 ForEach(folderDestinations) { destination in
-                    Button {
-                        model.start(in: destination.url)
-                    } label: {
-                        Label("Start Recording in \(destination.path)", systemImage: "record.circle")
+                    Toggle(isOn: destinationBinding(for: destination)) {
+                        Text(destination.path)
                     }
+                    .accessibilityLabel("Record in \(destination.path)")
                 }
             }
 
@@ -253,6 +244,18 @@ private struct QuickCaptureMenu: View {
     private var folderDestinations: [FolderDestination] {
         [FolderDestination(url: model.home.rootURL, path: "Simbi")]
             + model.rootFolders.flatMap { allFolderDestinations(for: $0, prefix: "") }
+    }
+
+    private func destinationBinding(for destination: FolderDestination) -> Binding<Bool> {
+        Binding(
+            get: {
+                model.quickStartParent.standardizedFileURL
+                    == destination.url.standardizedFileURL
+            },
+            // A folder row is an action, not a persistent on/off setting:
+            // clicking either the checked or unchecked row starts capture.
+            set: { _ in model.start(in: destination.url) }
+        )
     }
 
     private func allFolderDestinations(
