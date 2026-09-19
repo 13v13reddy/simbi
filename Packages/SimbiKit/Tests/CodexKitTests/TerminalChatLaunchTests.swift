@@ -41,8 +41,8 @@ struct TerminalChatLaunchTests {
         #expect(!command.hasPrefix("exec "))
         #expect(!command.hasPrefix("\""))
         #expect(!command.hasSuffix("\""))
-        #expect(command.contains("-C \"$SIMBI_NOTE_DIR\""))
-        #expect(command.contains("--add-dir \"$SIMBI_HOME_ROOT\""))
+        #expect(command.contains("-C \"$SIMBI_HOME_ROOT\""))
+        #expect(!command.contains("-C \"$SIMBI_NOTE_DIR\""))
         #expect(command.contains("-s workspace-write"))
         #expect(command.contains("-a on-request"))
         #expect(command.contains("-c developer_instructions=\"$SIMBI_CHAT_CONTEXT\""))
@@ -101,8 +101,9 @@ struct TerminalChatLaunchTests {
         let text = TerminalChatLaunch.developerInstructions(
             noteFolderURL: temp.note, homeRootURL: temp.home)
         #expect(
-            text.hasPrefix(
+            text.contains(
                 "You are helping with `Work/Standup`. The note currently contains: `note.md`."))
+        #expect(text.contains("active Simbi note is `Work/Standup`"))
         #expect(text.contains("Before every answer, re-list `context/`"))
     }
 

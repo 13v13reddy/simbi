@@ -29,12 +29,13 @@ public struct TerminalChatLaunch: Sendable, Equatable {
     /// vars keep their quotes.
     ///
     /// Flags mirror the retired app-server chat: workspace-write sandbox,
-    /// on-request approvals, the whole Simbi home writable. Note context
+    /// on-request approvals, and the Simbi home as the shared Codex project.
+    /// Note context
     /// is injected as a developer message; a `-c` value that fails TOML
     /// parsing is taken as a literal string (codex --help), so no
     /// escaping is needed.
     public static let commandLine =
-        "$SIMBI_CODEX_BIN -C \"$SIMBI_NOTE_DIR\" --add-dir \"$SIMBI_HOME_ROOT\" "
+        "$SIMBI_CODEX_BIN -C \"$SIMBI_HOME_ROOT\" "
         + "-c developer_instructions=\"$SIMBI_CHAT_CONTEXT\" "
         + "-s workspace-write -a on-request"
 
@@ -72,7 +73,10 @@ public struct TerminalChatLaunch: Sendable, Equatable {
         let chatInstructions = AgentInstructions.chat.resolve(
             homeRootURL: homeRootURL,
             variables: ["note_path": notePath, "files": contents])
-        return chatInstructions + "\n\n" + liveContextInstructions
+        let project = SimbiCodexProject(rootURL: homeRootURL)
+        return project.instructions(
+            for: noteFolderURL, taskDirectoryURL: noteFolderURL,
+            task: chatInstructions + "\n\n" + liveContextInstructions)
     }
 
     /// Top-level note files plus one level of `context/` and `files/`,

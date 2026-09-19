@@ -109,15 +109,16 @@ final class ChatWindow: NSWindow, NSWindowDelegate {
 
         if CodexInstallation.standard.isBinaryInstalled {
             let terminal = TerminalView(frame: contentRect(forFrameRect: frame))
-            // Pre-trust the note folder so the TUI opens on the composer
+            let homeRootURL = SimbiHome().rootURL
+            // Pre-trust the shared project so the TUI opens on the composer
             // instead of the per-directory trust prompt.
-            CodexTrust.ensureTrusted(directory: noteFolderURL)
+            CodexTrust.ensureTrusted(directory: homeRootURL)
             let launch = TerminalChatLaunch.forNote(
-                noteFolderURL: noteFolderURL, homeRootURL: SimbiHome().rootURL)
+                noteFolderURL: noteFolderURL, homeRootURL: homeRootURL)
             terminal.delegate = self
             terminal.configuration = TerminalSurfaceOptions(
                 backend: .exec,
-                workingDirectory: noteFolderURL.path,
+                workingDirectory: homeRootURL.path,
                 envVars: launch.envVars)
             terminal.controller = TerminalChatServices.controller
             self.terminal = terminal

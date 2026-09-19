@@ -221,15 +221,17 @@ public final class RecordingController {
                 let noteState = NoteRecordingState.current(noteFolder: noteFolderURL)
                 let fixerInstructions = AgentInstructions.fixer.resolve(
                     homeRootURL: SimbiHome().rootURL)
-                let savedThreadId =
+                let canResumeSavedThread =
                     noteState.fixerInstructionsVersion == TranscriptFixer.instructionsVersion
-                        && noteState.fixerInstructionsHash
-                            == AgentInstructions.fingerprint(fixerInstructions)
-                    ? noteState.fixerThreadId : nil
+                    && noteState.fixerInstructionsHash
+                        == AgentInstructions.fingerprint(fixerInstructions)
+                let savedThreadId = canResumeSavedThread ? noteState.fixerThreadId : nil
+                let retiredThreadId = canResumeSavedThread ? nil : noteState.fixerThreadId
                 let choice = settings[.fixer]
                 let fixer = TranscriptFixer(
                     noteFolderURL: noteFolderURL, client: CodexServices.appServer,
-                    savedThreadId: savedThreadId, model: choice.model,
+                    savedThreadId: savedThreadId, retiredThreadId: retiredThreadId,
+                    model: choice.model,
                     effort: choice.effort,
                     instructions: fixerInstructions)
                 let activity = fixerActivity

@@ -96,7 +96,9 @@ public enum WorkerOutput {
 /// bookkeeping is per-thread.
 actor CodexWorkerTurnRunner {
     struct Spec: Sendable {
-        var cwd: URL
+        var project: SimbiCodexProject
+        var noteFolderURL: URL
+        var taskDirectoryURL: URL
         /// `thread/start` sandbox ("workspace-write" / "read-only").
         var sandbox: String
         /// Turn sandbox scope; nil inherits the thread's sandbox (titler).
@@ -160,7 +162,8 @@ actor CodexWorkerTurnRunner {
     /// §5.1: state.json records thread ids).
     func run(
         instructions: String,
-        threadName: String,
+        role: String,
+        detail: String? = nil,
         onThreadStarted: @Sendable (String) async -> Void = { _ in }
     ) async throws -> String? {
         if !bound {
@@ -183,7 +186,9 @@ actor CodexWorkerTurnRunner {
         }
 
         let threadId = try await CodexTurn.startThread(
-            client: client, cwd: spec.cwd, sandbox: spec.sandbox, name: threadName)
+            client: client, cwd: spec.project.rootURL, sandbox: spec.sandbox,
+            name: spec.project.threadName(
+                for: spec.noteFolderURL, role: role, detail: detail))
         activeThreads.insert(threadId)
         await onThreadStarted(threadId)
 
@@ -207,7 +212,11 @@ actor CodexWorkerTurnRunner {
         _ = try await client.request(
             method: "turn/start",
             params: CodexTurn.startParams(
-                threadId: threadId, text: instructions, writableRoot: spec.writableRoot,
+                threadId: threadId,
+                text: spec.project.instructions(
+                    for: spec.noteFolderURL, taskDirectoryURL: spec.taskDirectoryURL,
+                    task: instructions),
+                writableRoot: spec.writableRoot,
                 model: spec.model, effort: spec.effort))
         try await awaitTurnCompletion(threadId: threadId)
         return messages[threadId]
