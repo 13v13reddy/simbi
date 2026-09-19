@@ -26,6 +26,12 @@ public final class RecordingController {
         controllers.all.contains { $0.status.isCapturing }
     }
 
+    /// The note currently capturing, if any. The menubar recorder uses this
+    /// to stop a recording without opening the main window.
+    public static var activeNoteFolderURL: URL? {
+        controllers.all.first(where: { $0.status.isCapturing })?.noteFolderURL
+    }
+
     /// True while THIS note is capturing. Read-only — never creates a
     /// controller as a side effect. The summary controller uses it to
     /// refuse generation triggers mid-recording (AI Notes spec §3).
@@ -179,6 +185,13 @@ public final class RecordingController {
         case .preparing, .stopping:
             break
         }
+    }
+
+    /// Starts this note's recording without requiring a visible NoteView.
+    /// Quick capture uses this entry point after creating the note folder.
+    public func startRecording() {
+        guard status == .idle else { return }
+        Task { await start() }
     }
 
     private func start() async {

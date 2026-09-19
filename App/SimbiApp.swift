@@ -54,5 +54,11 @@ struct SimbiApp: App {
         Settings {
             SettingsView()
         }
+        MenuBarExtra {
+            QuickCaptureMenuContent()
+        } label: {
+            QuickCaptureMenuBarLabel()
+        }
+        .menuBarExtraStyle(.menu)
     }
 }
