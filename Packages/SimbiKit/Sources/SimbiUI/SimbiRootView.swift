@@ -94,9 +94,21 @@ public struct SimbiRootView: View {
         }
         // Creating the shared client at launch arms AppServerJanitor's
         // quit cleanup: quitting must kill every running codex server —
-        // including older sessions' orphans — even if this session never
-        // talks to codex. (No server is spawned by this; that stays lazy.)
-        .task { _ = CodexServices.appServer }
+        // including older sessions' orphans. Project reconciliation also
+        // starts the server here so existing Simbi threads become visible in
+        // Codex as soon as the app opens.
+        .task {
+            _ = CodexServices.appServer
+            do {
+                try await SimbiCodexProjectOrganizer.reconcile(
+                    client: CodexServices.appServer, rootURL: model.home.rootURL)
+            } catch {
+                // Project organization is cosmetic; recording and
+                // transcription must remain available if Codex changes the
+                // experimental project API.
+                Log.codex.warning("organizing Codex threads failed: \(error)")
+            }
+        }
         // Decouple opening a note from clicking it: building NoteView (five
         // models, file reads, the markdown parse) is the expensive part, so
         // it runs a beat after the selection change. The short sleep lets the

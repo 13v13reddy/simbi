@@ -124,6 +124,18 @@ final class ChatWindow: NSWindow, NSWindowDelegate {
             self.terminal = terminal
             contentView = terminal
             makeFirstResponder(terminal)
+
+            // The Codex CLI exposes no project-id flag and app-server does
+            // not infer membership from cwd. Give it time to persist the new
+            // session, then attach that session to the registered Simbi
+            // project. The second pass covers slower first launches.
+            Task {
+                for delay in [Duration.seconds(1), .seconds(5)] {
+                    try? await Task.sleep(for: delay)
+                    try? await SimbiCodexProjectOrganizer.reconcile(
+                        client: CodexServices.appServer, rootURL: homeRootURL)
+                }
+            }
         } else {
             contentView = NSHostingView(
                 rootView: StatusBanner(
