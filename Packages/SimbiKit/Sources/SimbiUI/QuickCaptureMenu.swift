@@ -3,6 +3,11 @@ import Observation
 import SimbiKit
 import SwiftUI
 
+/// Stable scene identity for the app's single main window.
+public enum SimbiWindow {
+    public static let mainID = "simbi-main"
+}
+
 /// Menubar-first recording: choose any normal Simbi folder, create a
 /// timestamped note there, and start the per-note recorder immediately.
 @MainActor @Observable
@@ -150,11 +155,6 @@ public final class QuickCaptureModel {
         return path == root.path || !NoteOperations.isInsideNoteFolder(url)
     }
 
-    public func openSimbi() {
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.windows.first?.makeKeyAndOrderFront(nil)
-    }
-
 }
 
 /// The app-level menubar content. The model is resolved only after onboarding
@@ -167,15 +167,17 @@ public struct QuickCaptureMenuContent: View {
     public init() {}
 
     public var body: some View {
-        if onboarding.isActive {
-            Text("Finish Simbi setup to start recording")
-            Button("Open Simbi") {
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.windows.first?.makeKeyAndOrderFront(nil)
+        VStack(alignment: .leading, spacing: 6) {
+            if onboarding.isActive {
+                Text("Finish Simbi setup to start recording")
+                OpenSimbiButton()
+            } else {
+                QuickCaptureMenu(model: QuickCaptureModel.shared, activity: activity)
             }
-        } else {
-            QuickCaptureMenu(model: QuickCaptureModel.shared, activity: activity)
         }
+        .buttonStyle(.borderless)
+        .padding(10)
+        .frame(width: 280, alignment: .leading)
     }
 }
 
@@ -205,7 +207,7 @@ private struct QuickCaptureMenu: View {
         Group {
             if OnboardingState.isNeeded() {
                 Text("Finish Simbi setup to start recording")
-                Button("Open Simbi") { model.openSimbi() }
+                OpenSimbiButton()
             } else if activity.isRecording {
                 Section {
                     Label(
@@ -222,6 +224,7 @@ private struct QuickCaptureMenu: View {
                     Toggle(isOn: destinationBinding(for: destination)) {
                         Text(destination.path)
                     }
+                    .toggleStyle(.checkbox)
                     .accessibilityLabel("Record in \(destination.path)")
                 }
             }
@@ -233,7 +236,7 @@ private struct QuickCaptureMenu: View {
             }
 
             Divider()
-            Button("Open Simbi") { model.openSimbi() }
+            OpenSimbiButton()
             SettingsLink {
                 Text("Settings…")
             }
@@ -268,6 +271,17 @@ private struct QuickCaptureMenu: View {
             destinations.append(contentsOf: allFolderDestinations(for: child, prefix: path))
         }
         return destinations
+    }
+}
+
+private struct OpenSimbiButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Open Simbi") {
+            openWindow(id: SimbiWindow.mainID)
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 }
 
