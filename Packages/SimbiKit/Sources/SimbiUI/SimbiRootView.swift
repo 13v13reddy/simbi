@@ -100,6 +100,14 @@ public struct SimbiRootView: View {
         .task {
             _ = CodexServices.appServer
             do {
+                try await SimbiCodexDesktopProjectRegistrar.ensureProject(
+                    rootURL: model.home.rootURL)
+            } catch {
+                // A desktop-catalog failure must not prevent app-server
+                // assignment, which still keeps Simbi's worker threads usable.
+                Log.codex.warning("registering Codex desktop project failed: \(error)")
+            }
+            do {
                 try await SimbiCodexProjectOrganizer.reconcile(
                     client: CodexServices.appServer, rootURL: model.home.rootURL)
             } catch {
