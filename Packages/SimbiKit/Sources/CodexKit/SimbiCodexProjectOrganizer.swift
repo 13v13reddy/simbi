@@ -3,15 +3,23 @@ import Foundation
 /// Wire parsing kept separate from the organizer so project membership has
 /// deterministic unit coverage without launching the real app-server.
 enum SimbiCodexProjectAPI {
-    static func projectID(in data: Data, rootURL: URL) -> String? {
+    static func projectID(
+        in data: Data, rootURL: URL, preferredID: String? = nil
+    ) -> String? {
         let rootPath = rootURL.standardizedFileURL.path
-        return rows(in: data).first { row in
+        let matches = rows(in: data).filter { row in
             let roots = row["roots"] as? [[String: Any]] ?? []
             return roots.contains { root in
                 guard let path = root["path"] as? String else { return false }
                 return URL(filePath: path).standardizedFileURL.path == rootPath
             }
-        }?["id"] as? String
+        }
+        if let preferredID,
+            matches.contains(where: { $0["id"] as? String == preferredID })
+        {
+            return preferredID
+        }
+        return matches.first?["id"] as? String
     }
 
     static func importedProjectID(in data: Data) -> String? {
@@ -117,12 +125,16 @@ public enum SimbiCodexProjectOrganizer {
         private func findProject(
             client: AppServerClient, rootURL: URL
         ) async throws -> String? {
+            let preferredID = SimbiCodexDesktopProjectCatalog.project(
+                rootURL: rootURL)?.serverID
             var cursor: String?
             repeat {
                 var params: [String: any Sendable] = ["limit": 100]
                 if let cursor { params["cursor"] = cursor }
                 let result = try await client.request(method: "project/list", params: params)
-                if let id = SimbiCodexProjectAPI.projectID(in: result, rootURL: rootURL) {
+                if let id = SimbiCodexProjectAPI.projectID(
+                    in: result, rootURL: rootURL, preferredID: preferredID)
+                {
                     return id
                 }
                 cursor = SimbiCodexProjectAPI.nextCursor(in: result)
