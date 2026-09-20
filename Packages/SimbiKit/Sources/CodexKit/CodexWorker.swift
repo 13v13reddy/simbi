@@ -18,6 +18,16 @@ public enum CodexWorkerError: Error {
 /// Wire shapes shared by every worker turn (verified in
 /// Sources/simbi-appserver-spike/README.md).
 enum CodexTurn {
+    static func threadStartParams(
+        cwd: URL, sandbox: String, projectId: String?
+    ) -> [String: any Sendable] {
+        var params: [String: any Sendable] = [
+            "cwd": cwd.path, "approvalPolicy": "never", "sandbox": sandbox,
+        ]
+        if let projectId { params["projectId"] = projectId }
+        return params
+    }
+
     /// A single text input item for `turn/start`.
     static func textInput(_ text: String) -> [[String: any Sendable]] {
         [["type": "text", "text": text, "text_elements": [String]()]]
@@ -67,9 +77,20 @@ enum CodexTurn {
     static func startThread(
         client: AppServerClient, cwd: URL, sandbox: String, name: String
     ) async throws -> String {
+        let projectId: String?
+        do {
+            projectId = try await SimbiCodexProjectOrganizer.ensureProject(
+                client: client, rootURL: cwd)
+        } catch {
+            // Project organization is additive. A Codex app update must not
+            // be allowed to disable transcription or AI notes if its
+            // experimental project API changes.
+            Log.codex.warning("organizing Codex project failed; continuing unassigned: \(error)")
+            projectId = nil
+        }
         let resultData = try await client.request(
             method: "thread/start",
-            params: ["cwd": cwd.path, "approvalPolicy": "never", "sandbox": sandbox])
+            params: threadStartParams(cwd: cwd, sandbox: sandbox, projectId: projectId))
         let id = try threadId(fromStartResult: resultData)
         _ = try await client.request(
             method: "thread/name/set", params: ["threadId": id, "name": name])

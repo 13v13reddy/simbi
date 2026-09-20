@@ -5,6 +5,29 @@ import Testing
 
 @Suite("Simbi Codex project")
 struct SimbiCodexProjectTests {
+    @Test("finds the Codex project registered for the exact Simbi root")
+    func findsRegisteredProject() {
+        let result = Data(
+            #"{"data":[{"id":"other","roots":[{"path":"/tmp/Other"}]},{"id":"simbi","roots":[{"path":"/Users/test/Simbi"}]}],"nextCursor":null}"#
+                .utf8)
+
+        #expect(
+            SimbiCodexProjectAPI.projectID(
+                in: result, rootURL: URL(filePath: "/Users/test/Simbi")) == "simbi")
+    }
+
+    @Test("selects only Simbi threads not already assigned to the project")
+    func selectsThreadsForMigration() {
+        let result = Data(
+            #"{"data":[{"id":"move","originator":"simbi","cwd":"/tmp","projectId":null},{"id":"chat","originator":"codex_cli_rs","cwd":"/Users/test/Simbi/Work/Standup","projectId":null},{"id":"done","originator":"simbi","cwd":"/Users/test/Simbi","projectId":"simbi"},{"id":"foreign","originator":"other","cwd":"/tmp/Other","projectId":null}],"nextCursor":null}"#
+                .utf8)
+
+        #expect(
+            SimbiCodexProjectAPI.threadIDsToAssign(
+                in: result, projectID: "simbi",
+                rootURL: URL(filePath: "/Users/test/Simbi")) == ["move", "chat"])
+    }
+
     @Test("task instructions keep the project root shared and scope relative paths to one note")
     func scopesTaskToNote() {
         let root = URL(filePath: "/Users/test/Simbi")
