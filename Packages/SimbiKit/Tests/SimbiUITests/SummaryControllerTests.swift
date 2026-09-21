@@ -10,27 +10,38 @@ struct SummaryControllerTests {
     func contextRefreshGate() {
         #expect(
             SummaryController.contextRefreshAction(
-                enabled: true, transcriptHasCues: true, codexAvailable: true,
+                enabled: true, transcriptHasCues: true, summaryExists: true,
+                codexAvailable: true,
                 alreadyWorking: false, recordingActive: false) == .generate)
         #expect(
             SummaryController.contextRefreshAction(
-                enabled: true, transcriptHasCues: true, codexAvailable: true,
+                enabled: true, transcriptHasCues: true, summaryExists: true,
+                codexAvailable: true,
                 alreadyWorking: true, recordingActive: false) == .defer)
         #expect(
             SummaryController.contextRefreshAction(
-                enabled: true, transcriptHasCues: true, codexAvailable: true,
+                enabled: true, transcriptHasCues: true, summaryExists: true,
+                codexAvailable: true,
                 alreadyWorking: false, recordingActive: true) == .defer)
         #expect(
             SummaryController.contextRefreshAction(
-                enabled: true, transcriptHasCues: true, codexAvailable: false,
+                enabled: true, transcriptHasCues: true, summaryExists: true,
+                codexAvailable: false,
                 alreadyWorking: false, recordingActive: false) == .defer)
         #expect(
             SummaryController.contextRefreshAction(
-                enabled: false, transcriptHasCues: true, codexAvailable: true,
+                enabled: false, transcriptHasCues: true, summaryExists: true,
+                codexAvailable: true,
                 alreadyWorking: false, recordingActive: false) == .ignore)
         #expect(
             SummaryController.contextRefreshAction(
-                enabled: true, transcriptHasCues: false, codexAvailable: true,
+                enabled: true, transcriptHasCues: false, summaryExists: true,
+                codexAvailable: true,
+                alreadyWorking: false, recordingActive: false) == .ignore)
+        #expect(
+            SummaryController.contextRefreshAction(
+                enabled: true, transcriptHasCues: true, summaryExists: false,
+                codexAvailable: true,
                 alreadyWorking: false, recordingActive: false) == .ignore)
     }
 

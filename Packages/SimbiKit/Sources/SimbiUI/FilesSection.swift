@@ -3,94 +3,110 @@ import SimbiKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The note view's files section (SPEC.md §6): drag-drop target + file
-/// picker, one thumbnail tile per `files/` entry with conversion status
-/// and actions in a context menu.
-struct FilesSection: View {
+/// Stable paperclip action in the editor tab strip. Attachments remain
+/// available on an empty note and never consume permanent editor height.
+struct AttachmentsButton: View {
+    let model: FilesModel
+    @State private var presented = false
+
+    var body: some View {
+        Button {
+            presented.toggle()
+        } label: {
+            Image(systemName: "paperclip")
+                .font(.meta)
+                .foregroundStyle(.secondary)
+                .overlay(alignment: .topTrailing) {
+                    if !model.rows.isEmpty {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 6, height: 6)
+                            .offset(x: 3, y: -2)
+                    }
+                }
+        }
+        .buttonStyle(HoverCircleButtonStyle(inset: Design.iconGap))
+        .help("Attachments")
+        .accessibilityLabel("Attachments")
+        .popover(isPresented: $presented, arrowEdge: .bottom) {
+            AttachmentsPopover(model: model)
+        }
+    }
+}
+
+private struct AttachmentsPopover: View {
     let model: FilesModel
     @State private var showImporter = false
     @State private var isDropTargeted = false
-    @State private var selectedFile: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if model.rows.isEmpty {
-                // Empty state is one quiet row: label, hint, and the same add
-                // button — no dedicated shelf height until there are files.
-                HStack(spacing: Design.rowGap) {
-                    // Deliberately a tier above `SectionLabel` (13pt .body vs
-                    // the label's smaller tier) so the row reads as the section
-                    // header it replaces; same secondary color.
-                    Text("Files")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text("Add files. Codex turns them into note context.")
+        VStack(spacing: 0) {
+            HStack {
+                Text("Attachments")
+                    .font(.headline)
+                if !model.rows.isEmpty {
+                    Text("\(model.rows.count)")
                         .font(.meta)
                         .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                    Spacer()
-                    addButton
                 }
-                .padding(.leading, Design.editorInset)
-                .padding(.trailing, Design.stripPadding)
+                Spacer()
+                Button("Add Files", systemImage: "plus") {
+                    showImporter = true
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(HoverCircleButtonStyle(inset: Design.iconGap))
+                .help("Add Files…")
+            }
+            .padding(Design.paneInset)
+
+            Divider()
+
+            if model.rows.isEmpty {
+                VStack(spacing: Design.rowGap) {
+                    Image(systemName: "paperclip")
+                        .font(.title2)
+                        .foregroundStyle(.tertiary)
+                    VStack(spacing: Design.innerGap) {
+                        Text("No attachments")
+                            .font(.body.weight(.semibold))
+                        Text("Add files to make them available to this note's Chat.")
+                            .font(.meta)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    Button("Add Files…") { showImporter = true }
+                }
+                .frame(maxWidth: .infinity, minHeight: 150)
+                .padding(Design.paneInset)
             } else {
-                HStack {
-                    SectionLabel(title: "Files")
-                    Spacer()
-                    addButton
-                }
-                // Leading matches the editor's text inset; trailing matches the strip's
-                // vertical rhythm so the add button sits square in the corner.
-                .padding(.leading, Design.editorInset)
-                .padding(.trailing, Design.stripPadding)
-                ScrollView(.horizontal) {
-                    LazyHStack(alignment: .top, spacing: Design.rowGap) {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
                         ForEach(model.rows) { row in
-                            FileTile(model: model, row: row, selection: $selectedFile)
+                            AttachmentRow(model: model, row: row)
                         }
                     }
                     .padding(.vertical, Design.stripPadding)
                 }
-                .scrollIndicators(.never)
-                .fixedSize(horizontal: false, vertical: true)
-                .contentMargins(.horizontal, Design.editorInset, for: .scrollContent)
-                .mask {
-                    HStack(spacing: 0) {
-                        LinearGradient(
-                            colors: [.clear, .black],
-                            startPoint: .leading, endPoint: .trailing
-                        )
-                        .frame(width: Design.editorInset)
-                        Color.black
-                        LinearGradient(
-                            colors: [.black, .clear],
-                            startPoint: .leading, endPoint: .trailing
-                        )
-                        .frame(width: Design.editorInset)
-                    }
-                }
-                .background {
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .onTapGesture { selectedFile = nil }
-                }
+                .frame(maxHeight: 320)
             }
+
             if let error = model.importError {
+                Divider()
                 Text(error)
                     .font(.meta)
                     .foregroundStyle(Color.statusLive)
                     .lineLimit(2)
-                    .padding(.horizontal, Design.editorInset)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(Design.paneInset)
             }
         }
-        .padding(.vertical, Design.stripPadding)
-        .background(
-            Color.accentColor.opacity(isDropTargeted ? 0.08 : 0)
-        )
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Color.accentColor.opacity(isDropTargeted ? 1 : 0))
-                .frame(height: 2)
+        .frame(width: 360)
+        .background(Color.accentColor.opacity(isDropTargeted ? 0.08 : 0))
+        .overlay {
+            RoundedRectangle(cornerRadius: Design.Radius.card)
+                .stroke(
+                    Color.accentColor.opacity(isDropTargeted ? 1 : 0),
+                    lineWidth: 2)
         }
         .animation(Design.Anim.quick, value: isDropTargeted)
         .fileImporter(
@@ -103,7 +119,7 @@ struct FilesSection: View {
             }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            let files = urls.filter { $0.isFileURL }
+            let files = urls.filter(\.isFileURL)
             guard !files.isEmpty else { return false }
             model.importFiles(files)
             return true
@@ -111,78 +127,56 @@ struct FilesSection: View {
             isDropTargeted = $0
         }
     }
-
-    private var addButton: some View {
-        Button {
-            showImporter = true
-        } label: {
-            Image(systemName: "plus")
-                .font(.body)
-        }
-        .buttonStyle(HoverCircleButtonStyle())
-        .help("Add Files…")
-        .accessibilityLabel("Add Files")
-    }
 }
 
-/// One shelf tile: Quick Look thumbnail, name caption, conversion status
-/// overlay, and the file's actions in a context menu. Double-click opens
-/// the original; the overlay shows converting/failed and nothing when done.
-private struct FileTile: View {
+private struct AttachmentRow: View {
     let model: FilesModel
     let row: FilesModel.Row
-    @Binding var selection: String?
-
-    private var isSelected: Bool { selection == row.name }
+    @State private var hovered = false
 
     private var fileURL: URL { model.fileURL(for: row.name) }
 
-    private var thumbnailOpacity: Double {
-        if case .converting = row.status { return 0.35 }
-        return 1
-    }
-
     var body: some View {
-        VStack(spacing: Design.innerGap) {
-            FileThumbnail(
-                url: fileURL,
-                size: CGSize(width: Design.fileTileWidth, height: Design.fileThumbHeight),
-                revision: row.fileRevision
-            )
-            .opacity(thumbnailOpacity)
-            .background {
-                if isSelected {
-                    RoundedRectangle(cornerRadius: Design.Radius.card)
-                        .fill(Color.selectionBackplate)
-                }
+        HStack(spacing: Design.rowGap) {
+            statusIcon
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: Design.innerGap) {
+                Text(row.name)
+                    .font(.body)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(statusLabel)
+                    .font(.meta)
+                    .foregroundStyle(statusColor)
             }
-            .overlay { statusOverlay }
-            Text(row.name)
-                .font(.meta)
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
-                .truncationMode(.middle)
-                .foregroundStyle(isSelected ? Color.selectionInk : Color.primary)
-                .padding(.horizontal, Design.iconGap)
-                .padding(.vertical, 1)
-                .background {
-                    if isSelected {
-                        RoundedRectangle(cornerRadius: Design.Radius.row)
-                            .fill(Color.accentColor)
-                    }
+
+            Spacer(minLength: Design.rowGap)
+
+            if case .failed = row.status {
+                Button("Retry", systemImage: "arrow.clockwise") {
+                    model.retry(row.name)
                 }
+                .labelStyle(.iconOnly)
+                .buttonStyle(HoverCircleButtonStyle(inset: Design.iconGap))
+                .help("Retry conversion")
+            }
+
+            Button("Move to Trash", systemImage: "trash") {
+                model.delete(row.name)
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(HoverCircleButtonStyle(inset: Design.iconGap))
+            .foregroundStyle(hovered ? Color.destructiveAction : Color.secondary)
+            .opacity(hovered ? 1 : 0)
+            .accessibilityHidden(!hovered)
+            .help("Move to Trash")
         }
-        .frame(width: Design.fileTileWidth)
+        .padding(.horizontal, Design.paneInset)
+        .padding(.vertical, Design.stripPadding)
         .contentShape(Rectangle())
-        .help(row.name)
-        .onTapGesture(count: 2) {
-            NSWorkspace.shared.open(fileURL)
-        }
-        .simultaneousGesture(
-            TapGesture().onEnded {
-                selection = row.name
-            }
-        )
+        .onHover { hovered = $0 }
+        .onTapGesture(count: 2) { NSWorkspace.shared.open(fileURL) }
         .contextMenu {
             Button("Open") { NSWorkspace.shared.open(fileURL) }
             if case .done = row.status {
@@ -192,42 +186,41 @@ private struct FileTile: View {
                         title: "Context: \(row.name)")
                 }
             }
-            if case .failed = row.status {
-                Button("Retry Conversion") { model.retry(row.name) }
-            }
             if row.threadId != nil {
                 Button("View Codex Thread") { model.openThreadViewer(row.name) }
             }
-            Divider()
             Button("Reveal in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([fileURL])
             }
-            Divider()
-            Button("Move to Trash") {
-                if selection == row.name { selection = nil }
-                model.delete(row.name)
-            }
+        }
+        .hoverFill(
+            RoundedRectangle(cornerRadius: Design.Radius.row),
+            horizontalBleed: -Design.iconGap)
+    }
+
+    @ViewBuilder private var statusIcon: some View {
+        switch row.status {
+        case .converting:
+            ProgressView().controlSize(.small)
+        case .failed:
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Color.statusWarning)
+        case .done:
+            Image(systemName: "doc.fill")
+                .foregroundStyle(.secondary)
         }
     }
 
-    // Centered so status reads on any preview; the glass/material circle
-    // guarantees contrast. 36/18 are one-off display-glyph values per
-    // docs/design-system.md ("One-off display glyphs ... stay inline").
-    @ViewBuilder private var statusOverlay: some View {
+    private var statusLabel: String {
         switch row.status {
-        case .converting:
-            ProgressView()
-                .controlSize(.small)
-                .frame(width: 36, height: 36)
-                .floatingChrome(in: Circle())
-        case .failed:
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 18))
-                .foregroundStyle(Color.statusLive)
-                .frame(width: 36, height: 36)
-                .floatingChrome(in: Circle())
-        case .done:
-            EmptyView()
+        case .converting: "Preparing for Chat…"
+        case .failed: "Conversion failed"
+        case .done: "Ready for Chat"
         }
+    }
+
+    private var statusColor: Color {
+        if case .failed = row.status { return .statusWarning }
+        return .secondary
     }
 }

@@ -142,10 +142,10 @@ public final class SummaryController {
     /// Generate immediately when the note is quiet; otherwise retain one
     /// pending refresh regardless of how many batches arrive meanwhile.
     nonisolated static func contextRefreshAction(
-        enabled: Bool, transcriptHasCues: Bool, codexAvailable: Bool,
+        enabled: Bool, transcriptHasCues: Bool, summaryExists: Bool, codexAvailable: Bool,
         alreadyWorking: Bool, recordingActive: Bool
     ) -> ContextRefreshAction {
-        guard enabled, transcriptHasCues else { return .ignore }
+        guard enabled, transcriptHasCues, summaryExists else { return .ignore }
         if !codexAvailable || alreadyWorking || recordingActive { return .defer }
         return .generate
     }
@@ -206,6 +206,7 @@ public final class SummaryController {
         let action = Self.contextRefreshAction(
             enabled: SimbiSettings.current().aiNotesEnabled,
             transcriptHasCues: transcriptHasCues,
+            summaryExists: summaryExists,
             codexAvailable: codexAvailable,
             alreadyWorking: status == .working,
             recordingActive: RecordingController.isCapturing(noteFolderURL: noteFolderURL))
@@ -220,6 +221,7 @@ public final class SummaryController {
         let action = Self.contextRefreshAction(
             enabled: SimbiSettings.current().aiNotesEnabled,
             transcriptHasCues: transcriptHasCues,
+            summaryExists: summaryExists,
             codexAvailable: codexAvailable,
             alreadyWorking: status == .working,
             recordingActive: RecordingController.isCapturing(noteFolderURL: noteFolderURL))

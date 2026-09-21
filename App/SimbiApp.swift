@@ -10,8 +10,8 @@ struct SimbiApp: App {
         // The system "prefer tabs: always" setting auto-tabs a new window
         // into an existing group DURING creation, and SwiftUI (macOS 26)
         // never commits window content for windows born that way — they
-        // stay permanently blank. Chat windows join their note's tab group
-        // explicitly instead (ChatWindowManager), after content exists.
+        // stay permanently blank. Simbi's ancillary AppKit windows opt into
+        // their own explicit behavior after their content exists.
         NSWindow.allowsAutomaticWindowTabbing = false
 
         // Starts Sparkle. It checks in the background and shows nothing until
@@ -37,10 +37,6 @@ struct SimbiApp: App {
                 }
             }
         }
-        // The per-note chat windows (docs/SPEC.md §5.4) are NOT here on
-        // purpose: they are AppKit windows owned by ChatWindowManager
-        // (SimbiUI). See its doc comment for why they must not be a
-        // SwiftUI WindowGroup.
         // Per-note pipeline inspector (recording debug HUD), opened from
         // the recording header while a session is live.
         WindowGroup(

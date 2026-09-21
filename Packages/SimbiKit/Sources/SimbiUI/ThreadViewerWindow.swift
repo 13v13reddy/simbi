@@ -5,8 +5,7 @@ import SimbiKit
 import SwiftUI
 
 /// One ghostty app shared by every thread-viewer terminal; per-thread
-/// values travel in each surface's env vars (same shape as
-/// TerminalChatServices).
+/// values travel in each surface's env vars.
 @MainActor
 enum ThreadViewerServices {
     static let controller = TerminalController(
@@ -18,8 +17,8 @@ enum ThreadViewerServices {
 }
 
 /// Owns the per-thread viewer windows (live-view spec §4): plain AppKit
-/// windows like ChatWindow (macOS 26 scene machinery is hostile to
-/// terminal windows — see ChatWindowManager's doc comment), one window per
+/// windows because macOS 26 scene machinery is hostile to terminal
+/// surfaces, one window per
 /// thread, no tab grouping. Handles the archive dance for threads that
 /// want it: unarchive before attach (resume refuses archived threads),
 /// archive on close when the thread is idle and the caller opted in.

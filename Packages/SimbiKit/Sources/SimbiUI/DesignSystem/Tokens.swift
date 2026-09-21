@@ -33,6 +33,12 @@ enum Design {
     static let fileThumbHeight: CGFloat = 64
     /// Active-tab underline in the editor tab strip.
     static let tabUnderlineHeight: CGFloat = 2
+    /// Vertical rhythm between messages in the Dialogue chat.
+    static let chatMessageGap: CGFloat = 24
+    /// Top and bottom inset of the Dialogue conversation.
+    static let chatVerticalInset: CGFloat = 20
+    /// Keeps user bubbles visibly narrower than assistant prose.
+    static let chatUserLeadingInset: CGFloat = 56
 
     /// The note editor's base point size (document canvas, not UI chrome).
     static let editorFontSize: CGFloat = 15

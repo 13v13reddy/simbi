@@ -4,6 +4,7 @@ import SwiftUI
 enum EditorTab: Hashable {
     case aiNotes
     case myNotes
+    case chat
 }
 
 /// Editorial text tabs: quiet labels, an accent underline that slides to
@@ -15,6 +16,7 @@ struct EditorTabStrip: View {
     let isWorking: Bool
     let regenerateHelp: String
     let onRegenerate: () -> Void
+    let files: FilesModel
 
     @Namespace private var underline
 
@@ -22,6 +24,7 @@ struct EditorTabStrip: View {
         HStack(spacing: Design.paneInset) {
             tab("AI Notes", .aiNotes)
             tab("My Notes", .myNotes)
+            tab("Chat", .chat)
             Spacer()
             // Always in the layout, hidden when not applicable: an appearing
             // button would grow the row and visibly shift the tabs. Meta-tier
@@ -39,6 +42,8 @@ struct EditorTabStrip: View {
             .opacity(showRegenerate ? 1 : 0)
             .accessibilityHidden(!showRegenerate)
             .help(showRegenerate ? regenerateHelp : "")
+
+            AttachmentsButton(model: files)
         }
         .padding(.horizontal, Design.paneInset)
         .padding(.vertical, Design.stripPadding)

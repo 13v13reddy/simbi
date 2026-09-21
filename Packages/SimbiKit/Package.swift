@@ -90,7 +90,7 @@ let package = Package(
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ]
         ),
-        // ChatSession persists its thread id in the note's state.json.
+        // Note Chat persists its thread id separately in `.simbi/chat.json`.
         .target(name: "CodexKit", dependencies: ["SimbiKit"]),
         .target(
             name: "SimbiUI",
@@ -143,9 +143,9 @@ let package = Package(
             name: "simbi-tap-spike",
             dependencies: ["SimbiAudio"]
         ),
-        // M8 spike: embedded Ghostty terminal running the ChatGPT app's
-        // packaged codex TUI directly — the terminal-instead-of-chat-UI
-        // direction. Opens a real window; run by hand, not in CI.
+        // Historical M8 spike: embedded Ghostty terminal running the
+        // packaged codex TUI directly. Kept only as an executable spike;
+        // the shipped Note Chat is native SwiftUI.
         .executableTarget(
             name: "simbi-terminal-spike",
             dependencies: [

@@ -18,6 +18,7 @@ struct NoteView: View {
     @State private var importer: ImportController
     @State private var playback: PlaybackController
     @State private var summary: SummaryController
+    @State private var chat: NoteChatController
     @State private var titleController: TitleController
     @State private var aiDocument: AutosavingDocument
     @State private var selectedTab: EditorTab = .myNotes
@@ -43,6 +44,7 @@ struct NoteView: View {
         self._importer = State(initialValue: ImportController.shared(noteFolderURL: noteFolderURL))
         self._playback = State(initialValue: PlaybackController(noteFolderURL: noteFolderURL))
         self._summary = State(initialValue: SummaryController.shared(noteFolderURL: noteFolderURL))
+        self._chat = State(initialValue: NoteChatController.shared(noteFolderURL: noteFolderURL))
         self._titleController = State(
             initialValue: TitleController.shared(noteFolderURL: noteFolderURL))
         self._aiDocument = State(
@@ -112,13 +114,10 @@ struct NoteView: View {
         }
         .toolbar {
             ToolbarItem {
-                chatButton
-            }
-            ToolbarItem {
                 // Opening the folder itself (not selecting it in its
                 // parent) lands Finder inside the note's contents. Lives
                 // here, not in the root toolbar, so it exists only while
-                // a note is open (same as the chat button).
+                // a note is open.
                 Button("Show in Finder", systemImage: "folder") {
                     NSWorkspace.shared.open(noteFolderURL)
                 }
@@ -213,35 +212,24 @@ struct NoteView: View {
         }
     }
 
-    /// Spec §4: the strip exists once AI notes exist, are being generated,
-    /// or the last attempt failed; never before.
-    private var tabStripVisible: Bool {
-        Flags.uiPreview || summary.summaryExists || summary.status != .idle
-    }
-
     private var editorPane: some View {
         VStack(spacing: 0) {
-            if tabStripVisible {
-                // No hairline below: the strip reads as part of the document,
-                // not separate chrome (user call, 2026-08-10). Regenerate
-                // belongs to the AI Notes tab only.
-                EditorTabStrip(
-                    selected: $selectedTab,
-                    showRegenerate: recorder.status == .idle && selectedTab == .aiNotes,
-                    regenerateEnabled: summary.codexAvailable,
-                    isWorking: summary.status == .working,
-                    regenerateHelp: regenerateHelp,
-                    onRegenerate: { summary.regenerate() })
-            } else if summary.canOfferFirstGeneration && recorder.status == .idle {
-                // Issue #3: a note with a transcript but no AI notes has no
-                // strip, so no generation entry point. Offer one in the exact
-                // spot the regenerate button occupies once the strip exists;
-                // pressing it flips status to .working, which swaps this row
-                // for the real strip mid-generation.
-                generateOfferRow
-            }
-            if tabStripVisible && selectedTab == .aiNotes {
+            // Chat and attachments exist before any recording or summary,
+            // so every Note Workspace keeps one stable tab strip.
+            EditorTabStrip(
+                selected: $selectedTab,
+                showRegenerate: recorder.status == .idle && selectedTab == .aiNotes
+                    && summary.summaryExists,
+                regenerateEnabled: summary.codexAvailable,
+                isWorking: summary.status == .working,
+                regenerateHelp: regenerateHelp,
+                onRegenerate: { summary.regenerate() },
+                files: files)
+
+            if selectedTab == .aiNotes {
                 aiNotesPane
+            } else if selectedTab == .chat {
+                NoteChatView(controller: chat, onTimestamp: handleLinkClick)
             } else {
                 VStack(spacing: 0) {
                     if document.hasConflict {
@@ -252,36 +240,7 @@ struct NoteView: View {
                         onLinkClick: handleLinkClick)
                 }
             }
-            Divider()
-            FilesSection(model: files)
         }
-    }
-
-    /// A strip-shaped row holding only the generate button. The hidden tab
-    /// label is a height ghost: it gives this row the strip's exact height
-    /// so the working-state handoff to the real strip doesn't shift the
-    /// editor.
-    private var generateOfferRow: some View {
-        HStack(spacing: Design.paneInset) {
-            Text("AI Notes")
-                .font(.body.weight(.semibold))
-                .padding(.vertical, Design.innerGap)
-                .hidden()
-            Spacer()
-            Button(action: { summary.generateFirst() }) {
-                Image(systemName: "sparkles")
-                    .font(.meta)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(HoverCircleButtonStyle(inset: Design.iconGap))
-            .disabled(!summary.codexAvailable)
-            .help(
-                summary.codexAvailable
-                    ? "Generate AI notes from the recording"
-                    : "AI notes need the ChatGPT app. See the sidebar footer.")
-        }
-        .padding(.horizontal, Design.paneInset)
-        .padding(.vertical, Design.stripPadding)
     }
 
     private var regenerateHelp: String {
@@ -316,6 +275,8 @@ struct NoteView: View {
         // before generationCount reloaded the editor — an empty flash.
         if summary.firstGenerationInFlight || Flags.uiPreviewSummaryLoading {
             firstGenerationPlaceholder
+        } else if !summary.summaryExists && !Flags.uiPreview {
+            aiNotesEmptyState
         } else {
             MarkdownEditor(
                 text: Flags.uiPreview && !summary.summaryExists
@@ -326,6 +287,34 @@ struct NoteView: View {
             .allowsHitTesting(summary.status != .working)
             .opacity(summary.status == .working ? 0.6 : 1)
         }
+    }
+
+    private var aiNotesEmptyState: some View {
+        VStack(spacing: Design.rowGap) {
+            Spacer()
+            Image(systemName: "sparkles")
+                .font(.title2)
+                .foregroundStyle(.tertiary)
+            VStack(spacing: Design.innerGap) {
+                Text("No AI notes yet")
+                    .font(.body.weight(.semibold))
+                Text(
+                    summary.transcriptHasCues
+                        ? "Generate notes from the current transcript."
+                        : "AI notes will be available after a recording has a transcript."
+                )
+                .font(.meta)
+                .foregroundStyle(.secondary)
+            }
+            if summary.canOfferFirstGeneration && recorder.status == .idle {
+                Button("Generate AI Notes", systemImage: "sparkles") {
+                    summary.generateFirst()
+                }
+                .disabled(!summary.codexAvailable)
+            }
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private var firstGenerationPlaceholder: some View {
@@ -369,17 +358,6 @@ struct NoteView: View {
         if recorder.status == .idle && playback.hasAudio && !importer.decodingAudio {
             playback.play(from: seconds)
         }
-    }
-
-    /// In-app chat (SPEC.md §5.4): a note's chats live as native tabs of
-    /// one window; reopening focuses it, new chats come from its + button.
-    private var chatButton: some View {
-        Button {
-            ChatWindowManager.shared.openOrFocus(noteFolderURL: noteFolderURL)
-        } label: {
-            Label("Chat", systemImage: "bubble.left.and.bubble.right")
-        }
-        .help("Chat with Codex about this note")
     }
 
     /// §6 degraded states: recording works without Codex, but transcription

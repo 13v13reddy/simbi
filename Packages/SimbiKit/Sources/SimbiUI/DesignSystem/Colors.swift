@@ -13,6 +13,8 @@ extension Color {
     static let statusWarning = Color.orange
     /// Connected/healthy — status dots only, never text.
     static let statusOK = Color.green
+    /// Destructive controls such as a hover-revealed trash action.
+    static let destructiveAction = Color(nsColor: .systemRed)
 
     // MARK: Surfaces
 
