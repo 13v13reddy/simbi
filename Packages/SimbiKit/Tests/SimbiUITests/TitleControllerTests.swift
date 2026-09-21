@@ -101,7 +101,7 @@ struct TitleControllerTests {
         }
 
         await controller.awaitQuietThenApply("Design Sync")
-        #expect(renamedTo?.hasSuffix(" - Design Sync") == true)
+        #expect(renamedTo == TitleController.datedTitle("Design Sync", date: .now))
         #expect(polls >= 3)
     }
 
@@ -115,7 +115,7 @@ struct TitleControllerTests {
         controller.renameNote = { renamedTo = $0 }
 
         controller.applyGeneratedTitle("Design Sync", currentFolderName: "New Note")
-        #expect(renamedTo == "Design Sync")
+        #expect(renamedTo == TitleController.datedTitle("Design Sync", date: .now))
 
         // The user renamed while the titler ran: their name wins.
         renamedTo = nil
