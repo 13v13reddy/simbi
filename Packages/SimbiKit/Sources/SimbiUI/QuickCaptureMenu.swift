@@ -174,6 +174,11 @@ public struct QuickCaptureMenuContent: View {
             } else {
                 QuickCaptureMenu(model: QuickCaptureModel.shared, activity: activity)
             }
+            Divider()
+            Button("Quit Simbi") {
+                NSApplication.shared.terminate(nil)
+            }
+            .keyboardShortcut("q", modifiers: .command)
         }
         .buttonStyle(.borderless)
         .padding(10)
