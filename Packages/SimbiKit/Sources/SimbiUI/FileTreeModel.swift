@@ -1,4 +1,5 @@
 import AppKit
+import CodexKit
 import Foundation
 import Observation
 import SimbiKit
@@ -187,13 +188,30 @@ public final class FileTreeModel {
     }
 
     public func trash(_ url: URL) {
+        let chatThreadIds = NoteChatStore.threadIds(under: url)
         do {
             try NoteOperations.trash(url)
         } catch {
             Log.files.error("trashing \(url.lastPathComponent) failed: \(error)")
+            return
         }
         SidebarOrder.removed(url.lastPathComponent, in: url.deletingLastPathComponent())
         refresh()
+        // Deleting a note must never wait on Codex. Capture ids first,
+        // trash immediately, then archive their histories best-effort.
+        if !chatThreadIds.isEmpty {
+            Task { [chatThreadIds] in
+                for threadId in chatThreadIds {
+                    do {
+                        try await NoteChatWire.archive(
+                            client: CodexServices.appServer, threadId: threadId)
+                    } catch {
+                        Log.codex.warning(
+                            "archiving deleted note chat \(threadId) failed: \(error)")
+                    }
+                }
+            }
+        }
     }
 
     /// Moves `sources` into `folder` (the home root included), inserting at

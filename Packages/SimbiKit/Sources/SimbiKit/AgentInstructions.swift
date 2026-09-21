@@ -184,10 +184,10 @@ public enum AgentInstructions: String, CaseIterable, Identifiable, Sendable {
 
         {{ files }}
 
-        Read whichever files are relevant before answering, and when the user asks \
-        for changes, edit the files on disk. Keep your work inside the note \
-        folder: do not read, scan, or search elsewhere on disk unless the user \
-        explicitly asks.
+        Read whichever files are relevant before answering. This chat must not \
+        modify files; when the user asks for changes, describe the proposed edit \
+        in the reply. Keep your reading inside the note folder: do not read, scan, \
+        or search elsewhere on disk unless the user explicitly asks.
         """
 
     private static let defaultSummary = """

@@ -11,6 +11,9 @@ public enum NoteLayout {
     public static let summaryFileName = "summary.md"
     /// Hidden per-note state: state.json, upload queue, fixer worktree.
     public static let stateDirName = ".simbi"
+    /// Persistent note-chat identity. Kept separate from recording state so
+    /// independent writers cannot overwrite one another.
+    public static let chatStateFileName = "chat.json"
     /// Imported originals, untouched.
     public static let filesDirName = "files"
     /// Codex-converted markdown twins of `files/`.
@@ -26,6 +29,10 @@ public enum NoteLayout {
 
     public static func stateDirURL(noteFolder: URL) -> URL {
         noteFolder.appending(path: stateDirName, directoryHint: .isDirectory)
+    }
+
+    public static func chatStateURL(noteFolder: URL) -> URL {
+        stateDirURL(noteFolder: noteFolder).appending(path: chatStateFileName)
     }
 
     /// Disk-backed upload queue (`{cueIndex}.webm` + `{cueIndex}.json`).
