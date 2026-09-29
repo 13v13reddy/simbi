@@ -8,13 +8,15 @@ import Foundation
 /// the UI shows a degraded-state banner instead (SPEC.md §6).
 public struct CodexInstallation: Sendable, Equatable {
     public let binaryURL: URL
+    /// The outer ChatGPT bundle, not the nested CodexCLI.app.
+    public let appBundleURL: URL
     /// Must be `~/.codex` when spawning the app-server — the binary launched
     /// standalone defaults to a private home invisible to the ChatGPT app
     /// (references/codex-open/README.md, gotcha #1).
     public let codexHomeURL: URL
 
     public static let standard = CodexInstallation(
-        binaryURL: URL(filePath: "/Applications/ChatGPT.app/Contents/Resources/codex"),
+        appBundleURL: URL(filePath: "/Applications/ChatGPT.app"),
         codexHomeURL: FileManager.default.homeDirectoryForCurrentUser.appending(
             path: ".codex", directoryHint: .isDirectory)
     )
@@ -26,6 +28,19 @@ public struct CodexInstallation: Sendable, Equatable {
     public init(binaryURL: URL, codexHomeURL: URL) {
         self.binaryURL = binaryURL
         self.codexHomeURL = codexHomeURL
+        self.appBundleURL = binaryURL.deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+    }
+
+    init(appBundleURL: URL, codexHomeURL: URL) {
+        self.appBundleURL = appBundleURL
+        self.codexHomeURL = codexHomeURL
+        let resources = appBundleURL.appending(path: "Contents/Resources")
+        let nested = resources.appending(path: "codex-cli/CodexCLI.app/Contents/MacOS/codex")
+        // Launch the executable directly so orphan-process matching uses the same path.
+        self.binaryURL =
+            FileManager.default.isExecutableFile(atPath: nested.path)
+            ? nested : resources.appending(path: "codex")
     }
 
     public var isBinaryInstalled: Bool {
@@ -45,15 +60,6 @@ public struct CodexInstallation: Sendable, Equatable {
 
     /// Where "Get ChatGPT" sends the user.
     public static let downloadURL = URL(string: "https://chatgpt.com/download")!
-
-    /// The ChatGPT app bundle the codex binary ships inside — the
-    /// "Open ChatGPT" target.
-    public var appBundleURL: URL {
-        binaryURL
-            .deletingLastPathComponent()  // Resources
-            .deletingLastPathComponent()  // Contents
-            .deletingLastPathComponent()  // ChatGPT.app
-    }
 
     /// Loads credentials, or `nil` if absent/not a ChatGPT login.
     public func loadAuth() -> CodexAuth? {
