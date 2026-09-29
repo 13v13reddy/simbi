@@ -202,7 +202,7 @@ SwiftMath's resource bundle together with their license files:
   License 1.1 (OFL.txt in the bundle;
   <https://openfontlicense.org>).
 
-### MSDisplayLink (dependency of swift-markdown-engine)
+### MSDisplayLink (dependency of libghostty-spm)
 
 Cross-platform display-link abstraction.
 <https://github.com/Lakr233/MSDisplayLink>
@@ -213,8 +213,7 @@ Copyright (c) 2024 Lakr Aream, under the [MIT License](#mit-license).
 
 Embedded terminal emulator (GhosttyKit XCFramework, packaged for SwiftPM).
 <https://github.com/ghostty-org/ghostty> and
-<https://github.com/predict-woo/libghostty-spm> (fork of
-<https://github.com/Lakr233/libghostty-spm>)
+<https://github.com/Lakr233/libghostty-spm>
 
 - Ghostty: copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors, under
   the [MIT License](#mit-license).
