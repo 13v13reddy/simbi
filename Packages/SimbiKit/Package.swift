@@ -27,7 +27,7 @@ let package = Package(
         // for Xcode builds alongside FluidAudio. Pin exactly.
         .package(
             url: "https://github.com/Lakr233/libghostty-spm.git",
-            exact: "1.4.13"),
+            exact: "1.6.20260928"),
     ],
     targets: [
         .target(name: "SimbiKit"),
