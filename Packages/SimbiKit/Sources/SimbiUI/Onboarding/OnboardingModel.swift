@@ -123,11 +123,11 @@ final class OnboardingModel {
         switch planType?.lowercased() {
         case "prolite", "pro", "self_serve_business_usage_based", "ent26",
             "enterprise_cbp_automation", "enterprise_cbp_usage_based":
-            ModelChoice(model: "gpt-5.6-sol", effort: "high")
+            ModelChoice(model: "gpt-6-sol", effort: "high")
         case "plus", "team", "self_serve_business_prolite", "business", "enterprise", "edu":
-            ModelChoice(model: "gpt-5.6-luna", effort: "high")
+            ModelChoice(model: "gpt-6-luna", effort: "high")
         default:
-            ModelChoice(model: "gpt-5.6-luna", effort: "medium")
+            ModelChoice(model: "gpt-6-luna", effort: "medium")
         }
     }
 
