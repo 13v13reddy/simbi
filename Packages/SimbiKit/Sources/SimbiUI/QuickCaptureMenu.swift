@@ -182,7 +182,7 @@ public struct QuickCaptureMenuContent: View {
         }
         .buttonStyle(.borderless)
         .padding(10)
-        .frame(width: 280, alignment: .leading)
+        .frame(width: 220, alignment: .leading)
     }
 }
 
