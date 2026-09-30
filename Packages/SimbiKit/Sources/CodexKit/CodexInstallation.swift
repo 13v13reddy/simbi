@@ -8,13 +8,14 @@ import Foundation
 /// the UI shows a degraded-state banner instead (SPEC.md §6).
 public struct CodexInstallation: Sendable, Equatable {
     public let binaryURL: URL
+    public let appBundleURL: URL
     /// Must be `~/.codex` when spawning the app-server — the binary launched
     /// standalone defaults to a private home invisible to the ChatGPT app
     /// (references/codex-open/README.md, gotcha #1).
     public let codexHomeURL: URL
 
     public static let standard = CodexInstallation(
-        binaryURL: URL(filePath: "/Applications/ChatGPT.app/Contents/Resources/codex"),
+        appBundleURL: URL(filePath: "/Applications/ChatGPT.app", directoryHint: .isDirectory),
         codexHomeURL: FileManager.default.homeDirectoryForCurrentUser.appending(
             path: ".codex", directoryHint: .isDirectory)
     )
@@ -25,6 +26,19 @@ public struct CodexInstallation: Sendable, Equatable {
 
     public init(binaryURL: URL, codexHomeURL: URL) {
         self.binaryURL = binaryURL
+        self.appBundleURL = Self.containingAppBundle(for: binaryURL)
+        self.codexHomeURL = codexHomeURL
+    }
+
+    public init(appBundleURL: URL, codexHomeURL: URL) {
+        self.appBundleURL = appBundleURL
+        let candidates = [
+            appBundleURL.appending(path: "Contents/Resources/codex-cli/bin/codex"),
+            appBundleURL.appending(path: "Contents/Resources/codex"),
+        ]
+        self.binaryURL = candidates.first {
+            FileManager.default.isExecutableFile(atPath: $0.path)
+        } ?? candidates[0]
         self.codexHomeURL = codexHomeURL
     }
 
@@ -46,13 +60,16 @@ public struct CodexInstallation: Sendable, Equatable {
     /// Where "Get ChatGPT" sends the user.
     public static let downloadURL = URL(string: "https://chatgpt.com/download")!
 
-    /// The ChatGPT app bundle the codex binary ships inside — the
-    /// "Open ChatGPT" target.
-    public var appBundleURL: URL {
-        binaryURL
-            .deletingLastPathComponent()  // Resources
-            .deletingLastPathComponent()  // Contents
-            .deletingLastPathComponent()  // ChatGPT.app
+    private static func containingAppBundle(for binaryURL: URL) -> URL {
+        var candidate = binaryURL.deletingLastPathComponent()
+        while candidate.path != "/" {
+            if candidate.pathExtension == "app" { return candidate }
+            candidate.deleteLastPathComponent()
+        }
+        return binaryURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
     }
 
     /// Loads credentials, or `nil` if absent/not a ChatGPT login.

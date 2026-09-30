@@ -15,6 +15,14 @@ final class CodexStatusModel {
         case loading
         case loaded(CodexAccountStatus)
         case unavailable(String)
+
+        var reloadActionTitle: String? {
+            switch self {
+            case .loading: nil
+            case .loaded: "Refresh"
+            case .unavailable: "Try Again"
+            }
+        }
     }
 
     private(set) var phase: Phase = .loading
@@ -92,6 +100,8 @@ struct CodexStatusView: View {
                     Text(message)
                         .font(.meta)
                         .foregroundStyle(.secondary)
+                    Spacer(minLength: Design.iconGap)
+                    reloadButton(for: model.phase)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, Design.paneInset)
@@ -119,13 +129,7 @@ struct CodexStatusView: View {
                     }
                 }
                 Spacer()
-                Button {
-                    model.reload()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(HoverCircleButtonStyle())
-                .help("Refresh")
+                reloadButton(for: model.phase)
             }
             SectionLabel(title: "Usage")
             VStack(alignment: .leading, spacing: Design.rowGap) {
@@ -151,6 +155,21 @@ struct CodexStatusView: View {
                 }
                 .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func reloadButton(for phase: CodexStatusModel.Phase) -> some View {
+        if let title = phase.reloadActionTitle {
+            Button {
+                CodexSetupModel.shared.refresh()
+                model.reload()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .accessibilityLabel(title)
+            }
+            .buttonStyle(HoverCircleButtonStyle())
+            .help(title)
         }
     }
 

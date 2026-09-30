@@ -49,6 +49,53 @@ struct CodexAuthTests {
 
 @Suite("CodexInstallation")
 struct CodexInstallationTests {
+    @Test("current ChatGPT layout resolves the bundled Codex executable")
+    func resolvesCurrentChatGPTLayout() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "codex-installation-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let appBundleURL = root.appending(path: "ChatGPT.app", directoryHint: .isDirectory)
+        let binaryURL = appBundleURL.appending(
+            path: "Contents/Resources/codex-cli/bin/codex")
+        try FileManager.default.createDirectory(
+            at: binaryURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        _ = FileManager.default.createFile(atPath: binaryURL.path, contents: Data())
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: binaryURL.path)
+
+        let installation = CodexInstallation(
+            appBundleURL: appBundleURL,
+            codexHomeURL: root.appending(path: ".codex", directoryHint: .isDirectory))
+
+        #expect(installation.binaryURL == binaryURL)
+        #expect(installation.isBinaryInstalled)
+    }
+
+    @Test("legacy ChatGPT layout remains supported")
+    func resolvesLegacyChatGPTLayout() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "codex-installation-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let appBundleURL = root.appending(path: "ChatGPT.app", directoryHint: .isDirectory)
+        let binaryURL = appBundleURL.appending(path: "Contents/Resources/codex")
+        try FileManager.default.createDirectory(
+            at: binaryURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        _ = FileManager.default.createFile(atPath: binaryURL.path, contents: Data())
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: binaryURL.path)
+
+        let installation = CodexInstallation(
+            appBundleURL: appBundleURL,
+            codexHomeURL: root.appending(path: ".codex", directoryHint: .isDirectory))
+
+        #expect(installation.binaryURL == binaryURL)
+        #expect(installation.appBundleURL == appBundleURL)
+    }
+
     @Test("absence of binary and auth is reported, not fatal")
     func reportsAbsence() {
         let missing = CodexInstallation(
@@ -61,7 +108,12 @@ struct CodexInstallationTests {
     @Test("standard install points at the ChatGPT app bundle and ~/.codex")
     func standardPaths() {
         let std = CodexInstallation.standard
-        #expect(std.binaryURL.path == "/Applications/ChatGPT.app/Contents/Resources/codex")
+        #expect(
+            [
+                "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+                "/Applications/ChatGPT.app/Contents/Resources/codex",
+            ].contains(std.binaryURL.path))
+        #expect(std.appBundleURL.path == "/Applications/ChatGPT.app")
         #expect(std.authFileURL.lastPathComponent == "auth.json")
         #expect(std.codexHomeURL.lastPathComponent == ".codex")
     }
