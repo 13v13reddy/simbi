@@ -127,4 +127,13 @@ struct NoteChatWireTests {
         #expect(NoteChatWire.isArchivedThreadError(archived))
         #expect(!NoteChatWire.isArchivedThreadError(disconnected))
     }
+
+    @Test("a missing rollout is treated as a missing thread")
+    func missingRolloutClassification() {
+        let missingRollout = AppServerClient.ClientError.serverError(
+            code: -32600,
+            message: "no rollout found for thread id 01a0c1da-dfbd-7862-925d-c9a26122af6d")
+
+        #expect(NoteChatWire.isMissingThreadError(missingRollout))
+    }
 }

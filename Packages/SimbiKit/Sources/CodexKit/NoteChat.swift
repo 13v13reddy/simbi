@@ -322,6 +322,7 @@ public enum NoteChatWire {
         }
         let lowered = message.lowercased()
         return lowered.contains("not found")
+            || lowered.contains("no rollout found")
             || lowered.contains("does not exist")
             || lowered.contains("unknown thread")
             || lowered.contains("invalid thread")

@@ -5,6 +5,14 @@ import Testing
 
 @Suite("Note chat controller")
 struct NoteChatControllerTests {
+    @Test("chat phases expose clear activity labels")
+    @MainActor func activityLabels() {
+        #expect(NoteChatView.activityLabel(for: .loading) == "Opening this note's Chat…")
+        #expect(NoteChatView.activityLabel(for: .responding) == "Generating response…")
+        #expect(NoteChatView.activityLabel(for: .retrying) == "Connection interrupted. Retrying…")
+        #expect(NoteChatView.activityLabel(for: .ready) == nil)
+    }
+
     @Test("stream events must match both the visible thread and active turn")
     func eventScope() {
         let event = NoteChatEvent.assistantDelta(

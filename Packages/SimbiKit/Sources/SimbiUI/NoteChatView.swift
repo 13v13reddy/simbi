@@ -50,9 +50,15 @@ struct NoteChatView: View {
                             emptyState
                         } else {
                             ForEach(controller.messages) { message in
-                                MessageRow(message: message, onTimestamp: onTimestamp)
-                                    .id(message.id)
+                                if message.role != .assistant || !message.text.isEmpty {
+                                    MessageRow(message: message, onTimestamp: onTimestamp)
+                                        .id(message.id)
+                                }
                             }
+                        }
+                        if let label = Self.activityLabel(for: controller.phase) {
+                            ChatActivityRow(label: label)
+                                .id("chat-activity")
                         }
                         Color.clear
                             .frame(height: 1)
@@ -152,10 +158,6 @@ struct NoteChatView: View {
             .padding(.horizontal, Design.rowGap)
             .padding(.vertical, Design.stripPadding)
             .card()
-
-            Text("Chat can read this note and its attachments. It cannot edit them.")
-                .font(.meta)
-                .foregroundStyle(.tertiary)
         }
         .padding(.horizontal, Design.paneInset)
         .padding(.top, Design.stripPadding)
@@ -167,12 +169,48 @@ struct NoteChatView: View {
             && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    static func activityLabel(for phase: NoteChatController.Phase) -> String? {
+        switch phase {
+        case .unloaded, .loading:
+            "Opening this note's Chat…"
+        case .responding:
+            "Generating response…"
+        case .retrying:
+            "Connection interrupted. Retrying…"
+        case .ready, .unavailable, .failed:
+            nil
+        }
+    }
+
     private func submit() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, controller.canSend else { return }
         draft = ""
         nearBottom = true
         controller.send(text)
+    }
+}
+
+private struct ChatActivityRow: View {
+    let label: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Design.innerGap) {
+            Text("SIMBI")
+                .font(.metaSemibold)
+                .foregroundStyle(.tertiary)
+            HStack(spacing: Design.iconGap) {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityHidden(true)
+                Text(label)
+                    .font(.meta)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
     }
 }
 
