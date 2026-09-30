@@ -13,6 +13,8 @@ struct SummaryInstructionsTests {
         #expect(AgentInstructions.allCases.contains(.summary))
         let text = AgentInstructions.summary.defaultContents
         #expect(text.contains("[["))  // encodes the citation convention
+        #expect(text.contains("`- [ ]`"))  // action items render as task checkboxes
+        #expect(text.contains("`- [x]`"))  // completed user state survives refreshes
         #expect(!text.contains("\u{2014}"))  // instructions follow the no-em-dash copy rule
     }
 

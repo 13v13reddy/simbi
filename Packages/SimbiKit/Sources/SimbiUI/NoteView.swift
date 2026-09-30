@@ -343,7 +343,7 @@ struct NoteView: View {
         - Sam owns the rollback plan [[18:02]]
 
         ## Action items
-        - Dana files the status update today
+        - [ ] Dana files the status update today
         """
 
     /// Timestamp-shaped wiki-link targets seek and flash; anything else is

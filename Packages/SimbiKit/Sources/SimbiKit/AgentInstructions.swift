@@ -224,10 +224,13 @@ public enum AgentInstructions: String, CaseIterable, Identifiable, Sendable {
         - Unclear: key points, then a short detailed summary.
         Group by topic rather than strict chronology when that reads better, \
         and keep sections short with tight bullets. Include an action-items \
-        section only when the conversation produced concrete next steps. When \
-        the user's own notes already impose an order, theirs wins and this \
-        shaping applies only to the new material woven in. No preamble, no \
-        meta-commentary.
+        section only when the conversation produced concrete next steps. Format \
+        every item in that section as an unchecked Markdown task item (`- [ ]`) \
+        rather than a plain bullet. When updating existing AI notes, preserve any \
+        `- [x]` item the user has already checked; newly discovered action items \
+        always start unchecked. When the user's own notes already impose an \
+        order, theirs wins and this shaping applies only to the new material \
+        woven in. No preamble, no meta-commentary.
 
         Formatting: Markdown throughout. Bold the names, terms, and decisions \
         that carry the note; use a blockquote only for a standout takeaway or \
