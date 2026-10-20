@@ -6,6 +6,78 @@ import Testing
 
 @Suite("Transcript durability")
 struct TranscriptDurabilityTests {
+    @Test("Retry recovers a recording cue whose journal reservation failed before upload")
+    func retriesFailedCueReservation() async throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "transcript-reservation-\(UUID())")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let pipeline = RecordingPipeline(
+            noteFolderURL: folder, transcriber: FakeTranscriber(text: "recovered reservation"),
+            diarizer: FakeDiarizer { _ in .speech(slot: 0) }, vad: FakeVad { _ in true })
+        try await pipeline.start()
+        let journal = NoteLayout.stateDirURL(noteFolder: folder).appending(path: "transcript-outbox.json")
+        try FileManager.default.removeItem(at: journal)
+        try FileManager.default.createDirectory(at: journal, withIntermediateDirectories: true)
+        try await pipeline.ingest(samples: [Float](repeating: 0.1, count: 32_000))
+        await #expect(throws: (any Error).self) { try await pipeline.stop(runFixer: false) }
+        await #expect(throws: (any Error).self) { try await pipeline.abort(runFixer: false) }
+        let pending = NoteLayout.pendingDirURL(noteFolder: folder)
+        #expect(FileManager.default.fileExists(atPath: pending.appending(path: "1.json").path))
+        try FileManager.default.removeItem(at: journal)
+        await pipeline.retryTranscriptSaving()
+        for _ in 0..<100 {
+            if await pipeline.isTranscriptDrained { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await pipeline.isTranscriptDrained)
+        #expect(
+            try String(contentsOf: VTT.fileURL(noteFolder: folder), encoding: .utf8).contains("recovered reservation"))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: pending.path).isEmpty)
+    }
+
+    @Test(
+        "import recovery preserves all transcript work when its first journal write fails",
+        arguments: [false, true])
+    func importReservationFailureSurvivesRelaunch(partialPromotion: Bool) async throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "import-reservation-\(UUID())")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        func makePipeline() -> ImportPipeline {
+            ImportPipeline(
+                noteFolderURL: folder, transcriber: FakeTranscriber(text: "recovered imported speech"),
+                decoder: PlannedImportDecoder(), analyzer: PlannedImportAnalyzer())
+        }
+        let journal = NoteLayout.stateDirURL(noteFolder: folder).appending(path: "transcript-outbox.json")
+        try FileManager.default.createDirectory(at: journal, withIntermediateDirectories: true)
+        await #expect(throws: (any Error).self) {
+            try await makePipeline().run(fileURL: folder.appending(path: "fixture.wav"))
+        }
+        #expect(NoteRecordingState.current(noteFolder: folder).activeImport?.phase == 2)
+        let savedAudio = try Data(contentsOf: NoteLayout.audioURL(noteFolder: folder))
+        let preparation = NoteLayout.stateDirURL(noteFolder: folder).appending(path: "import-preparation")
+        if partialPromotion {
+            let pending = NoteLayout.pendingDirURL(noteFolder: folder)
+            try FileManager.default.createDirectory(at: pending, withIntermediateDirectories: true)
+            // A crash between the audio and sidecar renames must be resumable.
+            try FileManager.default.moveItem(
+                at: preparation.appending(path: "1.webm"), to: pending.appending(path: "1.webm"))
+        }
+        try FileManager.default.removeItem(at: journal)
+        try await makePipeline().resumePhase2()
+        #expect(NoteRecordingState.current(noteFolder: folder).activeImport == nil)
+        #expect(try Data(contentsOf: NoteLayout.audioURL(noteFolder: folder)) == savedAudio)
+        let document = try VTTParser.parse(String(contentsOf: VTT.fileURL(noteFolder: folder), encoding: .utf8))
+        let cues = document.entries.compactMap { entry -> Int? in
+            if case .cue(let index, _, _, _, let text, _) = entry, text == "recovered imported speech" {
+                return index
+            }
+            return nil
+        }
+        #expect(cues == [1, 2])
+        #expect(document.entries.contains { if case .gap = $0 { true } else { false } })
+        #expect(!FileManager.default.fileExists(atPath: preparation.path))
+    }
+
     @Test("Quit flushes the final speech segment durably without waiting for its upload")
     func quitPreservesFinalSegment() async throws {
         let folder = FileManager.default.temporaryDirectory.appending(path: "transcript-quit-\(UUID())")
@@ -152,6 +224,8 @@ struct TranscriptDurabilityTests {
         #expect(try String(contentsOf: transcript, encoding: .utf8).contains("result preserved through failure"))
         #expect(await transcriber.calls == 1)
         #expect(try FileManager.default.contentsOfDirectory(atPath: pending.path).isEmpty)
+        let journal = NoteLayout.stateDirURL(noteFolder: folder).appending(path: "transcript-outbox.json")
+        #expect((try JSONSerialization.jsonObject(with: Data(contentsOf: journal)) as? [Any])?.isEmpty == true)
     }
 
     @Test(
@@ -217,6 +291,24 @@ private struct DurabilityAnalyzer: OfflineAnalyzing {
     func prepare() async throws {}
     func analyze(_ samples: [Float]) async throws -> [ImportFrameRecord] {
         [ImportFrameRecord](repeating: .init(vadActive: true, dominantSlot: 0), count: 25)
+    }
+}
+
+private struct PlannedImportDecoder: MediaDecoding {
+    func decode(url: URL) -> AsyncThrowingStream<[Float], Error> {
+        AsyncThrowingStream {
+            $0.yield([Float](repeating: 0.1, count: 128_000))
+            $0.finish()
+        }
+    }
+}
+
+private struct PlannedImportAnalyzer: OfflineAnalyzing {
+    func prepare() async throws {}
+    func analyze(_ samples: [Float]) async throws -> [ImportFrameRecord] {
+        (0..<100).map { frame in
+            .init(vadActive: frame < 25 || frame >= 75, dominantSlot: frame < 25 ? 0 : frame >= 75 ? 1 : nil)
+        }
     }
 }
 

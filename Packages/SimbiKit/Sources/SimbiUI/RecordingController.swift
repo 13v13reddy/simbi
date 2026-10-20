@@ -185,6 +185,7 @@ public final class RecordingController {
     private var generation = 0
     private var captureStartedAt: TimeInterval?
     private var selectionWarning: RecordingProblem?
+    private var observedRecoveries: [RecordingSource: Int] = [:]
     private var ingestTask: Task<Void, Never>?
     private var liveTask: Task<Void, Never>?
     private var transcriptTask: Task<Void, Never>?
@@ -347,14 +348,17 @@ public final class RecordingController {
     private func start(generation: Int) async {
         audioProblem = nil
         selectionWarning = nil
+        observedRecoveries = [:]
         notifier.prepare()
         // An import owns the note's timeline (state.json sessionCount /
         // totalSamples) while it runs; a concurrent recording would clobber
         // it. The other direction holds too: ImportController's worker
         // waits while this note is capturing.
-        guard !ImportController.isImporting(noteFolderURL: noteFolderURL) else {
+        guard !ImportController.isImporting(noteFolderURL: noteFolderURL),
+            NoteRecordingState.current(noteFolder: noteFolderURL).activeImport == nil
+        else {
             status = .failed(
-                "A file import is transcribing into this note. Wait for it to finish first.")
+                "This note has an unfinished file import. Finish or retry its transcription before recording.")
             return
         }
         if micEnabled {
@@ -511,7 +515,12 @@ public final class RecordingController {
             }
         } else if sources.allSatisfy({ $0.state == .active }) {
             if selectionWarning == .microphonePermissionFallback { selectionWarning = nil }
-            if case .sourceUnavailable(let source, _) = audioProblem {
+            if let recovered = sources.first(where: {
+                $0.recoveryCount > observedRecoveries[$0.source, default: 0]
+            }) {
+                observedRecoveries[recovered.source] = recovered.recoveryCount
+                audioProblem = .sourceRecovered(recovered.source)
+            } else if case .sourceUnavailable(let source, _) = audioProblem {
                 audioProblem = .sourceRecovered(source)
             } else if audioProblem == .microphonePermissionFallback {
                 audioProblem = .sourceRecovered(.microphone)

@@ -52,6 +52,21 @@ public actor ImportPipeline {
 
     private var pendingDirURL: URL { NoteLayout.pendingDirURL(noteFolder: noteFolderURL) }
     private var audioFileURL: URL { NoteLayout.audioURL(noteFolder: noteFolderURL) }
+    private var preparationURL: URL { Self.preparationURL(noteFolder: noteFolderURL) }
+
+    private static func preparationURL(noteFolder: URL) -> URL {
+        NoteLayout.stateDirURL(noteFolder: noteFolder).appending(path: "import-preparation")
+    }
+
+    private struct PreparedTranscript: Codable {
+        enum Entry: Codable {
+            case note(VTTEntry)
+            case cue(PendingSegment)
+        }
+        let session: Int
+        let nextCueIndex: Int
+        let entries: [Entry]
+    }
 
     private static func seconds(_ samples: Int) -> TimeInterval {
         TimeInterval(samples) / TimeInterval(CutConstants.sampleRate)
@@ -188,15 +203,16 @@ public actor ImportPipeline {
             }
             let (pcm, entries) = try await runPhase1(
                 fileURL: fileURL, fileName: fileName, base: base)
+            let prepared = try prepareTranscript(entries: entries, pcm: pcm, base: base, session: session)
             try NoteRecordingState.update(noteFolder: noteFolderURL) { state in
                 state.totalSamples = base + pcm.count
                 state.sessionCount = session
+                state.nextCueIndex = prepared.nextCueIndex
                 state.lastSessionEnd = .now
                 state.activeImport?.phase = 2
                 state.imports[fileName]?.status = .transcribing
             }
-            try await runPhase2AndDrain(
-                fileName: fileName, entries: entries, pcm: pcm, base: base, session: session)
+            try await runPhase2AndDrain(fileName: fileName, prepared: prepared)
             // One fixer pass over the whole imported transcript, after
             // every cue is terminal and before the import reports done.
             // Failures degrade to "no fixing" — never a failed import.
@@ -206,6 +222,7 @@ public actor ImportPipeline {
                 state.imports[fileName]?.status = .done
             }
             emit(fileName, .finished)
+            try? FileManager.default.removeItem(at: preparationURL)
         } catch {
             // Phase-1 failure: undo the audio append and the marker (the
             // rollback both no-op once the marker says phase 2 — committed
@@ -290,41 +307,36 @@ public actor ImportPipeline {
     private static let uploadBackoff: [Duration] = [.seconds(1), .seconds(4)]
     private static let authRetryDelay: Duration = .seconds(30)
 
-    /// Reserve session/gap/cue entries in timeline order, encode each block
-    /// into `.simbi/pending/`, upload, and block until the queue drains.
-    /// With auth degraded the drain never resolves and `run` never returns —
-    /// that is correct: the pending queue is disk-safe and a relaunch
-    /// resumes via `resumePhase2`.
-    private func runPhase2AndDrain(
-        fileName: String, entries: [ImportTimelineEntry], pcm: [Float],
+    /// Prepare every segment and the complete ordering manifest before phase 2
+    /// commits the audio. The recorder cannot discover these staged files until
+    /// the commit; a journal failure afterward leaves the whole job recoverable.
+    private func prepareTranscript(
+        entries: [ImportTimelineEntry], pcm: [Float],
         base: Int, session: Int
-    ) async throws {
+    ) throws -> PreparedTranscript {
         let baseSec = Self.seconds(base)
         let endSec = baseSec + Self.seconds(pcm.count)
         func noteTime(_ frame: Int) -> TimeInterval {
             baseSec + TimeInterval(frame) * DiarizerPreset.frameDuration
         }
-        try FileManager.default.createDirectory(
-            at: pendingDirURL, withIntermediateDirectories: true)
-        activeFileName = fileName
-        uploadsTotal = entries.reduce(0) { if case .block = $1 { $0 + 1 } else { $0 } }
-        uploadsDone = 0
-        transcriptWriteError = nil
-        try outbox.append(.sessionStart(n: session, wallClock: .now, offset: baseSec))
+        if FileManager.default.fileExists(atPath: preparationURL.path) {
+            try FileManager.default.removeItem(at: preparationURL)
+        }
+        try FileManager.default.createDirectory(at: preparationURL, withIntermediateDirectories: true)
+        var nextCueIndex = NoteRecordingState.current(noteFolder: noteFolderURL).nextCueIndex
+        var prepared: [PreparedTranscript.Entry] = [
+            .note(.sessionStart(n: session, wallClock: .now, offset: baseSec))
+        ]
         for entry in entries {
             switch entry {
             case .gap(let start, let end):
-                try outbox.append(.gap(start: noteTime(start), end: noteTime(end)))
+                prepared.append(.note(.gap(start: noteTime(start), end: noteTime(end))))
             case .block(let block):
-                var cueIndex = 0
-                try NoteRecordingState.update(noteFolder: noteFolderURL) { state in
-                    cueIndex = state.nextCueIndex
-                    state.nextCueIndex += 1
-                }
-                lastImportedCue = max(lastImportedCue, cueIndex)
+                let cueIndex = nextCueIndex
+                nextCueIndex += 1
                 let sliceStart = block.startFrame * CutConstants.frameSamples
                 let sliceEnd = min(block.endFrame * CutConstants.frameSamples, pcm.count)
-                let webmURL = pendingDirURL.appending(path: "\(cueIndex).webm")
+                let webmURL = preparationURL.appending(path: "\(cueIndex).webm")
                 let segmentEncoder = try OpusWebMEncoder(fileURL: webmURL, mode: .create)
                 try segmentEncoder.append(samples: Array(pcm[sliceStart..<sliceEnd]))
                 try segmentEncoder.finish()
@@ -334,14 +346,58 @@ public actor ImportPipeline {
                     cueIndex: cueIndex, startSec: start, endSec: end,
                     speaker: block.speaker, continuation: false)
                 try PersistedJSON.encoder().encode(sidecar)
-                    .write(to: pendingDirURL.appending(path: "\(cueIndex).json"), options: .atomic)
-                try outbox.reserveCue(
-                    index: cueIndex, start: start, end: end,
-                    speaker: SpeakerLabel.name(slot: block.speaker), continuation: false)
-                if enqueueUpload(cueIndex) { remainingUploads += 1 }
+                    .write(to: preparationURL.appending(path: "\(cueIndex).json"), options: .atomic)
+                prepared.append(.cue(sidecar))
             }
         }
-        try outbox.append(.sessionEnd(n: session, wallClock: .now, offset: endSec))
+        prepared.append(.note(.sessionEnd(n: session, wallClock: .now, offset: endSec)))
+        let transcript = PreparedTranscript(session: session, nextCueIndex: nextCueIndex, entries: prepared)
+        try JSONEncoder().encode(transcript)
+            .write(to: preparationURL.appending(path: "transcript.json"), options: .atomic)
+        return transcript
+    }
+
+    /// Promotion is restartable: a crash can leave some files in pending and
+    /// others in preparation. All cues are reserved before starting uploads.
+    private func reservePreparedTranscript(_ prepared: PreparedTranscript) throws {
+        try FileManager.default.createDirectory(at: pendingDirURL, withIntermediateDirectories: true)
+        promotion: for entry in prepared.entries {
+            switch entry {
+            case .note(let note):
+                try outbox.append(note)
+            case .cue(let sidecar):
+                lastImportedCue = max(lastImportedCue, sidecar.cueIndex)
+                guard try !outbox.committedCueIndices().contains(sidecar.cueIndex) else { continue }
+                for ext in ["webm", "json"] {
+                    let name = "\(sidecar.cueIndex).\(ext)"
+                    let destination = pendingDirURL.appending(path: name)
+                    if !FileManager.default.fileExists(atPath: destination.path) {
+                        do {
+                            try FileManager.default.moveItem(at: preparationURL.appending(path: name), to: destination)
+                        } catch {
+                            // A stopped recording can drain ready import cues
+                            // and clean their files while recovery is replaying.
+                            if try outbox.committedCueIndices().contains(sidecar.cueIndex) { continue promotion }
+                            throw error
+                        }
+                    }
+                }
+                try outbox.reserveCue(
+                    index: sidecar.cueIndex, start: sidecar.startSec, end: sidecar.endSec,
+                    speaker: SpeakerLabel.name(slot: sidecar.speaker), continuation: sidecar.continuation)
+            }
+        }
+    }
+
+    private func runPhase2AndDrain(fileName: String, prepared: PreparedTranscript) async throws {
+        activeFileName = fileName
+        uploadsTotal = prepared.entries.reduce(0) { if case .cue = $1 { $0 + 1 } else { $0 } }
+        uploadsDone = 0
+        transcriptWriteError = nil
+        try reservePreparedTranscript(prepared)
+        for case .cue(let sidecar) in prepared.entries {
+            if enqueueUpload(sidecar.cueIndex) { remainingUploads += 1 }
+        }
         emit(fileName, .transcribing(done: 0, total: uploadsTotal))
         try await waitForDrain()
     }
@@ -356,6 +412,12 @@ public actor ImportPipeline {
         defer { running = false }
         activeFileName = active.fileName
         transcriptWriteError = nil
+        let manifest = preparationURL.appending(path: "transcript.json")
+        if FileManager.default.fileExists(atPath: manifest.path) {
+            let prepared = try JSONDecoder().decode(PreparedTranscript.self, from: Data(contentsOf: manifest))
+            guard prepared.session == active.n else { throw CocoaError(.fileReadCorruptFile) }
+            try reservePreparedTranscript(prepared)
+        }
         try outbox.retry()
         let committed = try outbox.committedCueIndices()
         try outbox.removeCommittedSegments(from: pendingDirURL)
@@ -399,6 +461,7 @@ public actor ImportPipeline {
             state.activeImport = nil
         }
         emit(active.fileName, .finished)
+        try? FileManager.default.removeItem(at: preparationURL)
     }
 
     private func waitForDrain() async throws {
@@ -560,6 +623,10 @@ public actor ImportPipeline {
                 defer { try? handle.close() }
                 try handle.truncate(atOffset: UInt64(cluster.byteOffset))
             }
+        }
+        let preparation = preparationURL(noteFolder: noteFolder)
+        if FileManager.default.fileExists(atPath: preparation.path) {
+            try FileManager.default.removeItem(at: preparation)
         }
         try NoteRecordingState.update(noteFolder: noteFolder) { state in
             if let name = state.activeImport?.fileName {

@@ -158,6 +158,9 @@ public final class TranscriptOutbox: @unchecked Sendable {
         defer { lock.unlock() }
         try restore()
         guard !queue.contains(where: { $0.cueIndex == index }) else { return }
+        // Another writer or a replayed NOTE may have drained this cue since
+        // the caller inspected the file. Never recreate its pending slot.
+        if (try? committedCueIndices().contains(index)) == true { return }
         queue.append(
             .pendingCue(
                 index: index, start: start, end: end, speaker: speaker,

@@ -456,7 +456,6 @@ public actor RecordingPipeline: TranscriptFixerHost {
             Log.recording.error(
                 "saving nextCueIndex \(state.nextCueIndex) to state.json failed: \(error)")
         }
-        trackedCues.insert(cueIndex)
         try outbox.reserveCue(
             index: cueIndex, start: startSec, end: endSec,
             speaker: SpeakerLabel.name(slot: speakerSlot),
@@ -467,7 +466,7 @@ public actor RecordingPipeline: TranscriptFixerHost {
                     cue: cueIndex, startFrame: command.startFrame, endFrame: command.endFrame,
                     speaker: command.speaker, reason: command.reason))
         }
-        enqueueUpload(cueIndex)
+        if enqueueUpload(cueIndex) { trackedCues.insert(cueIndex) }
     }
 
     // MARK: - Stop (§5.4)

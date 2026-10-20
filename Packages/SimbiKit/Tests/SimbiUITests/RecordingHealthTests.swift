@@ -83,6 +83,32 @@ struct RecordingHealthTests {
         #expect(text.contains("saved result"))
     }
 
+    @Test("an unfinished import cannot be bypassed by starting a new recording")
+    func refusesRecordingOverPendingImport() async throws {
+        let folder = try folder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let encoder = try OpusWebMEncoder(fileURL: NoteLayout.audioURL(noteFolder: folder), mode: .create)
+        try encoder.append(samples: [Float](repeating: 0.1, count: 32_000))
+        try encoder.finish()
+        let state = NoteRecordingState(
+            sessionCount: 1, totalSamples: 32_000,
+            activeImport: .init(fileName: "unfinished.wav", n: 1, baseSamples: 0, phase: 2),
+            imports: ["unfinished.wav": .init(status: .failed)])
+        try state.save(noteFolder: folder)
+        let source = HealthInput()
+        let (recorder, _) = controller(folder: folder, source: source, notices: HealthNotices())
+        recorder.startRecording()
+        try await waitUntil { recorder.status != .preparing }
+        #expect(source.startCount == 0)
+        #expect(NoteRecordingState.current(noteFolder: folder) == state)
+        if case .failed(let message) = recorder.status {
+            #expect(message.localizedCaseInsensitiveContains("import"))
+        } else {
+            Issue.record("Record must refuse an unfinished import")
+        }
+        if recorder.status.isCapturing { await recorder.stopRecording() }
+    }
+
     @Test("microphone permission denial preserves healthy system audio")
     func deniedMicrophonePreservesSystemAudio() async throws {
         let folder = try folder()
@@ -101,6 +127,40 @@ struct RecordingHealthTests {
         try await waitUntil { recorder.problem == .sourceRecovered(.microphone) }
         recorder.dismissProblem()
         #expect(recorder.status == .recording)
+        await recorder.stopRecording()
+    }
+
+    @Test("automatic recovery between health checks leaves an interruption notice")
+    func noticesFastAutomaticRecovery() async throws {
+        let folder = try folder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let microphone = HealthInput()
+        microphone.resumeOnRestart = true
+        let system = HealthInput()
+        var slowInspection = policy
+        slowInspection.sourceTimeout = 0.1
+        slowInspection.checkInterval = 0.6
+        slowInspection.startupTimeout = 2
+        slowInspection.writeTimeout = 2
+        let (recorder, _) = controller(
+            folder: folder, source: microphone, notices: HealthNotices(), system: system,
+            healthPolicy: slowInspection)
+        recorder.startRecording()
+        try await waitUntil { recorder.status == .recording }
+        microphone.paused = true
+        try await waitUntil { microphone.startCount == 2 }
+        try await Task.sleep(for: .milliseconds(650))
+        #expect(recorder.status == .recording)
+        #expect(system.startCount == 1)
+        #expect(recorder.problem == .sourceRecovered(.microphone))
+        recorder.dismissProblem()
+        try await Task.sleep(for: .milliseconds(650))
+        #expect(recorder.problem == nil)
+        microphone.paused = true
+        try await waitUntil { microphone.startCount == 3 }
+        try await Task.sleep(for: .milliseconds(650))
+        #expect(recorder.problem == .sourceRecovered(.microphone))
+        #expect(system.startCount == 1)
         await recorder.stopRecording()
     }
 
@@ -408,6 +468,11 @@ private final class HealthInput: MicrophoneCapturing, SystemCapturing, @unchecke
     private var continuation: AsyncStream<[Float]>.Continuation?
     private var pause = false
     private var starts = 0
+    private var resume = false
+    var resumeOnRestart: Bool {
+        get { lock.withLock { resume } }
+        set { lock.withLock { resume = newValue } }
+    }
     var startCount: Int { lock.withLock { starts } }
     var paused: Bool {
         get { lock.withLock { pause } }
@@ -417,6 +482,7 @@ private final class HealthInput: MicrophoneCapturing, SystemCapturing, @unchecke
     func start() throws -> AsyncStream<[Float]> {
         lock.withLock {
             starts += 1
+            if resume && starts > 1 { pause = false }
             let (stream, continuation) = AsyncStream.makeStream(of: [Float].self)
             self.continuation = continuation
             let timer = DispatchSource.makeTimerSource()

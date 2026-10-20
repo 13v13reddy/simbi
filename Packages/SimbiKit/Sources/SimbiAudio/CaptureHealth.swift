@@ -48,6 +48,8 @@ public struct CaptureSourceHealth: Equatable, Sendable {
     public let receivedSamples: Int
     public let lastSampleTime: TimeInterval?
     public let recoveryAttempts: Int
+    /// Completed recoveries survive brief state transitions between UI checks.
+    public let recoveryCount: Int
 }
 
 /// Provenance survives zero filling: real, quiet input counts as captured audio;

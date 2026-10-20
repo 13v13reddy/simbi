@@ -19,6 +19,7 @@ final class CaptureSourceRunner: @unchecked Sendable {
         var attemptStarted: TimeInterval
         var nextRetry: TimeInterval
         var attempts = 0
+        var recoveries = 0
         var opening = true
         var ended = false
     }
@@ -52,7 +53,8 @@ final class CaptureSourceRunner: @unchecked Sendable {
         state.withLock {
             CaptureSourceHealth(
                 source: source, state: $0.phase, receivedSamples: $0.receivedSamples,
-                lastSampleTime: $0.lastSampleTime, recoveryAttempts: $0.attempts)
+                lastSampleTime: $0.lastSampleTime, recoveryAttempts: $0.attempts,
+                recoveryCount: $0.recoveries)
         }
     }
 
@@ -142,7 +144,8 @@ final class CaptureSourceRunner: @unchecked Sendable {
         guard !samples.isEmpty else { return }
         let (accepted, recovered) = state.withLock { value in
             guard value.active, value.generation == generation else { return (false, false) }
-            let recovered = value.phase != .active && value.attempts > 0
+            let recovered = value.phase == .recovering || value.attempts > 0
+            if recovered { value.recoveries += 1 }
             value.phase = .active
             value.receivedSamples += samples.count
             value.lastSampleTime = ProcessInfo.processInfo.systemUptime
