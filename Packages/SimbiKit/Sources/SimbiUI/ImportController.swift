@@ -34,6 +34,11 @@ public final class ImportController {
         return false
     }
 
+    static var protectedNoteFolders: [URL] {
+        controllers.all.filter { $0.current != nil || !$0.queue.isEmpty || $0.fixingTranscript }
+            .map(\.noteFolderURL)
+    }
+
     public private(set) var status: Status = .idle
     /// True while an import is still writing audio.webm (decode phase):
     /// the playback bar must stay hidden then — the timeline is growing
@@ -61,7 +66,7 @@ public final class ImportController {
             noteFolderURL: noteFolderURL,
             transcriber: CodexTranscriber(),
             decoder: MediaFileDecoder(),
-            analyzer: OfflineSpeechAnalyzer())
+            analyzer: OfflineSpeechAnalyzer(), outbox: .shared(noteFolderURL: noteFolderURL))
         recoverLeftoverImportIfNeeded()
     }
 
@@ -71,7 +76,7 @@ public final class ImportController {
     /// phase-2 marker (`resumePending`), so the drain must be kicked
     /// before any new import. No-op while an import owns the worker slot:
     /// the marker then belongs to the running import, not to a leftover.
-    private func recoverLeftoverImportIfNeeded() {
+    private func recoverLeftoverImportIfNeeded(retryFailures: Bool = false) {
         guard current == nil else { return }
         let state = NoteRecordingState.current(noteFolder: noteFolderURL)
         guard let active = state.activeImport else { return }
@@ -92,15 +97,61 @@ public final class ImportController {
             current = file
             status = .importing(file: file, detail: "Resuming transcription")
             Task { [pipeline] in
+                let progressTask = observeProgress()
+                var failure: String?
                 do {
-                    try await pipeline.resumePhase2()
+                    try await pipeline.resumePhase2(retryFailures: retryFailures)
+                    RecordingController.shared(noteFolderURL: noteFolderURL).reportTranscriptSaveFailure(false)
+                    RecordingController.shared(noteFolderURL: noteFolderURL).reportTranscriptionFailure(false)
                 } catch {
                     Log.files.error("resuming import of \(file) failed: \(error)")
+                    failure = Self.failureMessage(for: error, fileName: file)
+                    reportTranscriptFailure(error)
                 }
-                self.status = .idle
+                progressTask.cancel()
+                await progressTask.value
+                self.status = failure.map { .failed(message: $0) } ?? .idle
                 self.current = nil
                 self.pump()
             }
+        }
+    }
+
+    func retryTranscriptSaving() {
+        guard !RecordingController.isCapturing(noteFolderURL: noteFolderURL) else { return }
+        if current == nil {
+            recoverLeftoverImportIfNeeded()
+        } else {
+            Task { [pipeline] in
+                do {
+                    try await pipeline.retryTranscriptSaving()
+                    RecordingController.shared(noteFolderURL: noteFolderURL).reportTranscriptSaveFailure(false)
+                } catch {
+                    RecordingController.shared(noteFolderURL: noteFolderURL).reportTranscriptSaveFailure(true)
+                    RecordingDiagnostics.error("retrying imported transcript saving failed: \(error)")
+                }
+            }
+        }
+    }
+
+    func retryTranscription() {
+        guard !RecordingController.isCapturing(noteFolderURL: noteFolderURL) else { return }
+        if current == nil {
+            recoverLeftoverImportIfNeeded(retryFailures: true)
+        } else {
+            Task { [pipeline] in
+                do { try await pipeline.retryTranscription() } catch { reportTranscriptFailure(error) }
+            }
+        }
+    }
+
+    private func reportTranscriptFailure(_ error: Error) {
+        let recorder = RecordingController.shared(noteFolderURL: noteFolderURL)
+        if (error as? ImportPipelineError) == .transcriptionFailed {
+            recorder.reportTranscriptSaveFailure(false)
+            recorder.reportTranscriptionFailure(true)
+        } else {
+            recorder.reportTranscriptSaveFailure(true)
         }
     }
 
@@ -108,6 +159,7 @@ public final class ImportController {
     /// queues the file to become the note's recording. Failures land in
     /// `status` for the pane; pressing the button again is the retry.
     func startUpload(fileURL: URL) {
+        guard !ApplicationQuitCoordinator.shared.isQuitting else { return }
         guard MediaFileDecoder.kind(of: fileURL.lastPathComponent) == .supported else {
             status = .failed(
                 message: "This format is not supported. Choose an audio or video file.")
@@ -125,7 +177,8 @@ public final class ImportController {
     }
 
     private func pump() {
-        guard current == nil, let fileURL = queue.first else { return }
+        guard !ApplicationQuitCoordinator.shared.isQuitting, current == nil, let fileURL = queue.first else { return }
+        guard NoteRecordingState.current(noteFolder: noteFolderURL).activeImport?.phase != 2 else { return }
         let fileName = fileURL.lastPathComponent
         current = fileName
         queue.removeFirst()
@@ -134,6 +187,9 @@ public final class ImportController {
             while RecordingController.isCapturing(noteFolderURL: noteFolderURL) {
                 status = .importing(file: fileName, detail: "Waiting for recording to stop")
                 try? await Task.sleep(for: .seconds(2))
+            }
+            while ApplicationQuitCoordinator.shared.isQuitting {
+                try? await Task.sleep(for: .milliseconds(100))
             }
             status = .importing(file: fileName, detail: "Analyzing")
             // Fixer per settings, exactly like RecordingController.start():
@@ -161,24 +217,17 @@ public final class ImportController {
                 await pipeline.attachFixer(nil)
             }
             decodingAudio = true
-            let progressTask = Task { [pipeline] in
-                for await progress in await pipeline.progressUpdates() {
-                    if case .analyzing = progress.stage {
-                        self.decodingAudio = true
-                    } else {
-                        self.decodingAudio = false
-                    }
-                    self.fixingTranscript = progress.stage == .fixing
-                    self.status = .importing(
-                        file: progress.fileName, detail: Self.detail(progress.stage))
-                }
-            }
+            let progressTask = observeProgress()
             var failure: String?
             do {
                 try await pipeline.run(fileURL: fileURL)
+                RecordingController.shared(noteFolderURL: noteFolderURL).reportTranscriptionFailure(false)
             } catch {
                 Log.files.error("import of \(fileName) failed: \(error)")
                 failure = Self.failureMessage(for: error, fileName: fileName)
+                if NoteRecordingState.current(noteFolder: noteFolderURL).activeImport?.phase == 2 {
+                    reportTranscriptFailure(error)
+                }
             }
             progressTask.cancel()
             // Drain any delivered update before committing the final UI state.
@@ -188,9 +237,27 @@ public final class ImportController {
             status = failure.map { .failed(message: $0) } ?? .idle
             current = nil
             if failure == nil {
-                onImportFinished?()
+                if !ApplicationQuitCoordinator.shared.isQuitting { onImportFinished?() }
             }
             pump()
+        }
+    }
+
+    private func observeProgress() -> Task<Void, Never> {
+        Task { [pipeline] in
+            for await progress in await pipeline.progressUpdates() {
+                guard !Task.isCancelled else { return }
+                if case .failed = progress.stage, await pipeline.hasTranscriptionFailures {
+                    RecordingController.shared(noteFolderURL: noteFolderURL).reportTranscriptionFailure(true)
+                }
+                if case .analyzing = progress.stage {
+                    decodingAudio = true
+                } else {
+                    decodingAudio = false
+                }
+                fixingTranscript = progress.stage == .fixing
+                status = .importing(file: progress.fileName, detail: Self.detail(progress.stage))
+            }
         }
     }
 
@@ -211,6 +278,8 @@ public final class ImportController {
 
     private static func failureMessage(for error: Error, fileName: String) -> String {
         switch error as? ImportPipelineError {
+        case .transcriptionFailed:
+            return RecordingProblem.transcriptionFailed.message
         case .noAudio:
             return "\(fileName) has no audio to import."
         case .recordingRecoveryPending:
@@ -239,8 +308,8 @@ public final class ImportController {
             return "Fixing transcript"
         case .finished:
             return "Finished"
-        case .failed:
-            return "Failed"
+        case .failed(let message):
+            return message
         }
     }
 }

@@ -28,6 +28,10 @@ public final class RecordingController {
 
     /// The note currently capturing, if any. The menubar recorder uses this
     /// to stop a recording without opening the main window.
+    public static var activeStatus: Status? {
+        controllers.all.first(where: { $0.status.isCapturing })?.status
+    }
+
     public static var activeNoteFolderURL: URL? {
         controllers.all.first(where: { $0.status.isCapturing })?.noteFolderURL
     }
@@ -37,6 +41,32 @@ public final class RecordingController {
     /// refuse generation triggers mid-recording (AI Notes spec §3).
     static func isCapturing(noteFolderURL: URL) -> Bool {
         controllers[noteFolderURL]?.status.isCapturing ?? false
+    }
+
+    static var protectedNoteFolders: [URL] {
+        controllers.all.filter {
+            $0.status.isCapturing || $0.isFinalizing || $0.pendingStopNotification
+                || $0.pipeline.hasPendingTranscriptWork
+                || $0.fixerActivity.status == .working || $0.fixerActivity.status == .waiting
+        }.map(\.noteFolderURL)
+    }
+
+    static func finishAllForQuit() async -> Bool {
+        var saved = true
+        for controller in controllers.all where controller.status.isCapturing || controller.isFinalizing {
+            if !(await controller.finishForQuit()) { saved = false }
+        }
+        return saved
+    }
+
+    func finishForQuit() async -> Bool {
+        if status.isCapturing && !isFinalizing {
+            await finish(failure: nil, waitForPreparation: status == .preparing && capture == nil, forQuit: true)
+        }
+        while isFinalizing { try? await Task.sleep(for: .milliseconds(20)) }
+        if case .failed = status { return false }
+        guard let state = try? NoteRecordingState.load(noteFolder: noteFolderURL) else { return false }
+        return state.activeSession == nil
     }
 
     public enum Status: Equatable {
@@ -60,7 +90,7 @@ public final class RecordingController {
     }
 
     private(set) var status: Status = .idle {
-        didSet { RecordingActivity.shared.refresh() }
+        didSet { activity.refresh() }
     }
     /// Note-timeline seconds, live while recording.
     private(set) var elapsed: TimeInterval = 0
@@ -85,7 +115,39 @@ public final class RecordingController {
     /// Set when a requested source degraded at start (system tap couldn't
     /// start, saved mic not connected) — recording proceeds with what's
     /// left under this banner (SPEC.md §7).
-    private(set) var systemAudioBanner: String?
+    var systemAudioBanner: String? {
+        guard let problem, !problem.isFatal else { return nil }
+        return problem.message
+    }
+    private var audioProblem: RecordingProblem? {
+        didSet { refreshProblem() }
+    }
+    private var transcriptSaveFailed = false {
+        didSet { refreshProblem() }
+    }
+    private var transcriptionFailed = false {
+        didSet { refreshProblem() }
+    }
+    private(set) var problem: RecordingProblem? {
+        didSet {
+            guard problem != oldValue else { return }
+            persistProblem()
+            if let problem {
+                activity.report(problem, noteFolderURL: noteFolderURL)
+                if problem.isRecovered {
+                    notifier.clear(noteFolderURL: noteFolderURL)
+                } else {
+                    notifier.post(problem: problem, noteFolderURL: noteFolderURL)
+                }
+            } else {
+                activity.clearProblem(noteFolderURL: noteFolderURL)
+                notifier.clear(noteFolderURL: noteFolderURL)
+            }
+        }
+    }
+    private(set) var isFinalizing = false
+    var canStop: Bool { capture != nil && !isFinalizing }
+    var canRetry: Bool { !isFinalizing && (status == .idle || !status.isCapturing) }
 
     /// Input devices for the source menu, re-read on each open so plugging
     /// in a mic shows up without a restart.
@@ -109,17 +171,60 @@ public final class RecordingController {
     /// this URL.
     let noteFolderURL: URL
     private let pipeline: RecordingPipeline
-    private var capture: MixedCapture?
+    private var capture: (any RecordingCapturing)?
+    private let makeCapture: @Sendable () -> any RecordingCapturing
+    private let requestMicrophoneAccess: @MainActor @Sendable () async -> Bool
+    private let healthPolicy: RecordingHealthPolicy
+    private let notifier: any RecordingNotifying
+    private let activity: RecordingActivity
+    private let enableFixer: Bool
+    private let persistSourcePreferences: Bool
+    private var healthTask: Task<Void, Never>?
+    private var preparationDeadline: Task<Void, Never>?
+    private var startTask: Task<Void, Never>?
+    private var generation = 0
+    private var captureStartedAt: TimeInterval?
+    private var selectionWarning: RecordingProblem?
     private var ingestTask: Task<Void, Never>?
     private var liveTask: Task<Void, Never>?
+    private var transcriptTask: Task<Void, Never>?
+    private var transcriptionTask: Task<Void, Never>?
+    private var pendingStopNotification = false
     private var watcher: FileTreeWatcher?
 
-    public init(noteFolderURL: URL) {
-        self.noteFolderURL = noteFolderURL
-        self.pipeline = RecordingPipeline(
+    public convenience init(noteFolderURL: URL) {
+        self.init(
             noteFolderURL: noteFolderURL,
-            transcriber: CodexTranscriber(),
-            diarizer: SortformerStream())
+            pipeline: RecordingPipeline(
+                noteFolderURL: noteFolderURL, transcriber: CodexTranscriber(), diarizer: SortformerStream(),
+                outbox: .shared(noteFolderURL: noteFolderURL)),
+            makeCapture: { MixedCapture() },
+            requestMicrophoneAccess: { await AVCaptureDevice.requestAccess(for: .audio) },
+            notifier: RecordingNotifications.shared, enableFixer: true, persistSourcePreferences: true)
+    }
+
+    init(
+        noteFolderURL: URL, pipeline: RecordingPipeline,
+        makeCapture: @escaping @Sendable () -> any RecordingCapturing,
+        requestMicrophoneAccess: @escaping @MainActor @Sendable () async -> Bool,
+        healthPolicy: RecordingHealthPolicy = RecordingHealthPolicy(),
+        notifier: any RecordingNotifying, activity: RecordingActivity = .shared, enableFixer: Bool = false,
+        persistSourcePreferences: Bool = false
+    ) {
+        self.noteFolderURL = noteFolderURL
+        self.pipeline = pipeline
+        self.makeCapture = makeCapture
+        self.requestMicrophoneAccess = requestMicrophoneAccess
+        self.healthPolicy = healthPolicy
+        self.notifier = notifier
+        self.activity = activity
+        self.enableFixer = enableFixer
+        self.persistSourcePreferences = persistSourcePreferences
+        let storedProblem = StoredRecordingProblem.load(noteFolder: noteFolderURL)
+        self.problem = storedProblem
+        self.audioProblem = storedProblem?.isTranscriptProblem == true ? nil : storedProblem
+        self.transcriptSaveFailed = storedProblem == .transcriptSaveFailed
+        self.transcriptionFailed = storedProblem == .transcriptionFailed
         let state = NoteRecordingState.current(noteFolder: noteFolderURL)
         self.hasRecording = state.sessionCount > 0 || state.activeSession != nil
         self.hasFixerThread = state.fixerThreadId != nil
@@ -131,6 +236,44 @@ public final class RecordingController {
         watcher = FileTreeWatcher.observing(url: noteFolderURL) { [weak self] in
             self?.refreshFileState()
         }
+        if let problem { activity.report(problem, noteFolderURL: noteFolderURL) }
+        observeTranscriptSaving()
+    }
+
+    private func observeTranscriptSaving() {
+        guard transcriptTask == nil, NoteRecordingState.current(noteFolder: noteFolderURL).activeImport == nil else {
+            return
+        }
+        transcriptTask = Task { [pipeline, weak self] in
+            await pipeline.retryTranscriptSaving()
+            for await failed in await pipeline.transcriptSaveUpdates() {
+                guard !Task.isCancelled else { return }
+                self?.transcriptSaveFailed = failed
+            }
+        }
+        transcriptionTask = Task { [pipeline, weak self] in
+            for await failed in await pipeline.transcriptionUpdates() {
+                guard !Task.isCancelled else { return }
+                self?.transcriptionFailed = failed
+            }
+        }
+    }
+
+    func reportTranscriptSaveFailure(_ failed: Bool) {
+        transcriptSaveFailed = failed
+    }
+
+    func reportTranscriptionFailure(_ failed: Bool) { transcriptionFailed = failed }
+
+    isolated deinit {
+        healthTask?.cancel()
+        preparationDeadline?.cancel()
+        startTask?.cancel()
+        ingestTask?.cancel()
+        liveTask?.cancel()
+        transcriptTask?.cancel()
+        transcriptionTask?.cancel()
+        capture?.stop()
     }
 
     /// state.json is also plain-file state. Adopt external bookkeeping while
@@ -144,6 +287,7 @@ public final class RecordingController {
     }
 
     private func persistSources() {
+        guard persistSourcePreferences else { return }
         let home = SimbiHome()
         var settings = SimbiSettings.current(home: home)
         settings.micEnabled = micEnabled
@@ -179,10 +323,12 @@ public final class RecordingController {
     public func toggle() {
         switch status {
         case .idle, .failed:
-            Task { await start() }
+            startRecording()
         case .recording:
             Task { await stop() }
-        case .preparing, .stopping:
+        case .preparing:
+            if canStop { Task { await stop() } }
+        case .stopping:
             break
         }
     }
@@ -190,12 +336,18 @@ public final class RecordingController {
     /// Starts this note's recording without requiring a visible NoteView.
     /// Quick capture uses this entry point after creating the note folder.
     public func startRecording() {
-        guard status == .idle else { return }
-        Task { await start() }
+        guard canRetry, !ApplicationQuitCoordinator.shared.isQuitting else { return }
+        observeTranscriptSaving()
+        generation += 1
+        let generation = generation
+        status = .preparing
+        startTask = Task { [weak self] in await self?.start(generation: generation) }
     }
 
-    private func start() async {
-        status = .preparing
+    private func start(generation: Int) async {
+        audioProblem = nil
+        selectionWarning = nil
+        notifier.prepare()
         // An import owns the note's timeline (state.json sessionCount /
         // totalSamples) while it runs; a concurrent recording would clobber
         // it. The other direction holds too: ImportController's worker
@@ -206,10 +358,22 @@ public final class RecordingController {
             return
         }
         if micEnabled {
-            guard await AVCaptureDevice.requestAccess(for: .audio) else {
-                status = .failed("Microphone access denied. Enable it in System Settings.")
-                return
+            let granted = await requestMicrophoneAccess()
+            guard generation == self.generation else { return }
+            if !granted {
+                if !systemAudioEnabled {
+                    audioProblem = .microphonePermission
+                    status = .failed(RecordingProblem.microphonePermission.message)
+                    return
+                }
+                selectionWarning = .microphonePermissionFallback
             }
+        }
+        preparationDeadline = Task { [weak self, healthPolicy] in
+            do { try await Task.sleep(for: .seconds(healthPolicy.preparationTimeout)) } catch { return }
+            guard let self, generation == self.generation, captureStartedAt == nil else { return }
+            RecordingDiagnostics.error("recording preparation timed out")
+            await finish(failure: .startupFailed, waitForPreparation: true)
         }
         do {
             // Fixer (SPEC.md §5.2): reuses the note's saved thread if any.
@@ -217,7 +381,7 @@ public final class RecordingController {
             // version bump or a user edit to FIXER.md — is retired; a
             // fresh thread with the current prompt starts instead.
             let settings = SimbiSettings.current()
-            if settings.transcriptFixerEnabled {
+            if enableFixer && settings.transcriptFixerEnabled {
                 let noteState = NoteRecordingState.current(noteFolder: noteFolderURL)
                 let fixerInstructions = AgentInstructions.fixer.resolve(
                     homeRootURL: SimbiHome().rootURL)
@@ -243,81 +407,241 @@ public final class RecordingController {
                 await pipeline.attachFixer(nil)
             }
             try await pipeline.start()
+            guard generation == self.generation else { return }
+            preparationDeadline?.cancel()
+            preparationDeadline = nil
             // Refresh right after pipeline.start(): that's where the fixer
             // thread is (or isn't) created. When codex is unavailable no
             // thread exists, the status stays .off, and the sparkles button
             // stays hidden (degraded state, SPEC.md §8).
-            if settings.transcriptFixerEnabled {
+            if enableFixer && settings.transcriptFixerEnabled {
                 hasFixerThread =
                     NoteRecordingState.current(noteFolder: noteFolderURL).fixerThreadId != nil
                 if hasFixerThread {
                     fixerActivity.noteRecordingStarted()
                 }
             }
-            let capture = MixedCapture()
+            let capture = makeCapture()
             self.capture = capture
             // A saved mic that's unplugged degrades to the default device
             // (with a banner) rather than blocking the recording.
             var deviceUID = micDeviceUID
-            var micBanner: String?
             if micEnabled, let uid = deviceUID, AudioInputDevices.deviceID(forUID: uid) == nil {
                 deviceUID = nil
-                micBanner = "Selected microphone isn't connected. Using the system default."
+                selectionWarning = .microphoneFallback
             }
-            let stream = try capture.start(
+            let stream = try capture.startBatches(
                 config: .init(
                     micEnabled: micEnabled,
                     micDeviceUID: deviceUID,
                     systemAudioEnabled: systemAudioEnabled))
-            systemAudioBanner = capture.systemAudioFailure ?? micBanner
-            status = .recording
-            hasRecording = true
+            captureStartedAt = ProcessInfo.processInfo.systemUptime
+            healthTask = Task { [weak self, healthPolicy] in
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .seconds(healthPolicy.checkInterval)) } catch { return }
+                    await self?.checkHealth()
+                }
+            }
 
-            liveTask = Task { [pipeline] in
+            liveTask = Task { [pipeline, weak self] in
                 for await update in await pipeline.liveUpdates() {
-                    self.elapsed = update.elapsed
+                    guard let self else { return }
+                    self.elapsed = max(self.elapsed, update.elapsed)
                     self.tentativeSpeaker = update.tentativeSpeaker
                 }
             }
-            ingestTask = Task { [pipeline] in
+            ingestTask = Task.detached(priority: .userInitiated) { [pipeline, weak self, capture] in
                 for await batch in stream {
+                    guard !Task.isCancelled else { return }
                     do {
-                        try await pipeline.ingest(samples: batch)
+                        try await pipeline.ingest(
+                            samples: batch.samples, capturedSampleCount: batch.capturedSampleCount)
                     } catch {
-                        self.status = .failed("Recording failed: \(error)")
-                        break
+                        RecordingDiagnostics.error("recording ingest failed: \(error)")
+                        capture.stop()
+                        Task { @MainActor [weak self] in await self?.finish(failure: .recordingFailed) }
+                        return
                     }
                 }
             }
         } catch {
-            if !micEnabled {
-                // System-only has no mic to degrade to; the tap failing is
-                // almost always the screen/system-audio TCC permission.
-                status = .failed(
-                    "System audio capture couldn't start (check the System Audio Recording "
-                        + "permission in System Settings, or enable the microphone): \(error)")
+            guard generation == self.generation else { return }
+            RecordingDiagnostics.error("recording startup failed: \(error)")
+            await finish(failure: .startupFailed)
+        }
+    }
+
+    func checkHealth() async {
+        guard !isFinalizing, let capture, let started = captureStartedAt else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let saved = pipeline.writeProgress.snapshot
+        let sources = capture.sourceHealth
+        if status == .preparing, saved.capturedSamples > 0, saved.fileBytes > saved.initialBytes {
+            status = .recording
+            hasRecording = true
+        }
+        elapsed = max(elapsed, saved.elapsed)
+        if status == .preparing, now - started >= healthPolicy.startupTimeout {
+            await finish(failure: sources.contains(where: { $0.receivedSamples > 0 }) ? .writeStalled : .noAudio)
+            return
+        }
+        if status == .recording {
+            let unsavedSeconds =
+                Double(max(0, capture.producedSamples - saved.writtenSamples))
+                / Double(CutConstants.sampleRate)
+            if now - (saved.lastWriteTime ?? started) >= healthPolicy.writeTimeout
+                || unsavedSeconds >= healthPolicy.writeTimeout
+            {
+                await finish(failure: .writeStalled)
+                return
+            }
+            let lastInput = sources.compactMap(\.lastSampleTime).max() ?? started
+            if now - lastInput >= healthPolicy.sourceTimeout {
+                await finish(failure: .noAudio)
+                return
+            }
+        }
+        if let missing = sources.first(where: { $0.state == .recovering || $0.state == .unavailable }),
+            sources.contains(where: { $0.state == .active })
+        {
+            if missing.source == .microphone, selectionWarning == .microphonePermissionFallback {
+                audioProblem = .microphonePermissionFallback
             } else {
-                status = .failed("Could not start recording: \(error)")
+                audioProblem = .sourceUnavailable(missing.source, retrying: missing.state == .recovering)
+            }
+        } else if sources.allSatisfy({ $0.state == .active }) {
+            if selectionWarning == .microphonePermissionFallback { selectionWarning = nil }
+            if case .sourceUnavailable(let source, _) = audioProblem {
+                audioProblem = .sourceRecovered(source)
+            } else if audioProblem == .microphonePermissionFallback {
+                audioProblem = .sourceRecovered(.microphone)
+            } else if audioProblem?.isRecovered != true {
+                audioProblem = selectionWarning
             }
         }
     }
 
+    public func retryUnavailableSources() {
+        guard !isFinalizing, let capture else { return }
+        capture.retryUnavailableSources()
+    }
+
+    /// A notification can outlive its capture, including an app relaunch.
+    /// Retry the missing source during a recording or resume the note otherwise.
+    func retryRecording() {
+        if problem == .transcriptSaveFailed {
+            retryTranscriptSaving()
+        } else if problem == .transcriptionFailed {
+            retryTranscription()
+        } else if status.isCapturing {
+            retryUnavailableSources()
+        } else {
+            startRecording()
+        }
+    }
+
+    func retryTranscriptSaving() {
+        if NoteRecordingState.current(noteFolder: noteFolderURL).activeImport?.phase == 2 {
+            ImportController.shared(noteFolderURL: noteFolderURL).retryTranscriptSaving()
+        } else {
+            Task { [pipeline] in await pipeline.retryTranscriptSaving() }
+        }
+    }
+
+    func retryTranscription() {
+        if NoteRecordingState.current(noteFolder: noteFolderURL).activeImport?.phase == 2 {
+            Task { [pipeline] in await pipeline.resumePausedTranscription() }
+            ImportController.shared(noteFolderURL: noteFolderURL).retryTranscription()
+        } else {
+            Task { [pipeline] in await pipeline.retryTranscription() }
+        }
+    }
+
+    public func dismissProblem() {
+        guard problem?.isTranscriptProblem != true, (!status.isCapturing || problem?.isRecovered == true), !isFinalizing
+        else { return }
+        audioProblem = nil
+        if !status.isCapturing { status = .idle }
+    }
+
+    public func stopRecording() async { await stop() }
+
     private func stop() async {
+        await finish(failure: nil, waitForPreparation: status == .preparing && capture == nil)
+    }
+
+    private func finish(failure: RecordingProblem?, waitForPreparation: Bool = false, forQuit: Bool = false) async {
+        guard !isFinalizing else { return }
+        isFinalizing = true
+        generation += 1
+        preparationDeadline?.cancel()
+        preparationDeadline = nil
+        let pendingPreparation = startTask
+        startTask?.cancel()
+        startTask = nil
+        if let failure { audioProblem = failure }
         status = .stopping
-        capture?.stop()  // finishes the stream; ingest drains what's left
+        healthTask?.cancel()
+        healthTask = nil
+        captureStartedAt = nil
+        capture?.stop()
+        capture = nil
+        if waitForPreparation {
+            if forQuit {
+                // Invalidates the actor's preparation token before a model or
+                // permission request returns, without waiting on that request.
+                try? await pipeline.abort(runFixer: false)
+            } else {
+                await pendingPreparation?.value
+            }
+        }
+        // A failing model/write must not hold a hardware source open. Cancel
+        // its ingestion before waiting for the actor to finalize saved audio.
+        if failure != nil { ingestTask?.cancel() }
         await ingestTask?.value
         ingestTask = nil
         liveTask?.cancel()
         liveTask = nil
-        capture = nil
+        var terminalFailure = failure
         do {
-            try await pipeline.stop()
-            status = .idle
-            tentativeSpeaker = nil
-            notifyStoppedAfterTranscriptDrain()
+            if failure != nil {
+                try await pipeline.abort(runFixer: !forQuit)
+            } else if forQuit, !(await pipeline.isRecording) {
+                try await pipeline.abort(runFixer: false)
+            } else {
+                try await pipeline.stop(runFixer: !forQuit)
+            }
         } catch {
-            status = .failed("Could not stop cleanly: \(error)")
+            RecordingDiagnostics.error("finalizing recording failed: \(error)")
+            terminalFailure = terminalFailure ?? .recordingFailed
+            audioProblem = terminalFailure
+            do { try await pipeline.abort(runFixer: !forQuit) } catch {
+                RecordingDiagnostics.error("preserving partial recording failed: \(error)")
+            }
         }
+        isFinalizing = false
+        tentativeSpeaker = nil
+        if let terminalFailure {
+            audioProblem = terminalFailure
+            status = .failed(terminalFailure.message)
+        } else {
+            status = .idle
+            if case .sourceUnavailable(let source, _) = audioProblem {
+                audioProblem = .sourceUnavailable(source, retrying: false)
+            }
+            if !forQuit { notifyStoppedAfterTranscriptDrain() }
+        }
+    }
+
+    private func refreshProblem() {
+        problem =
+            audioProblem?.isFatal == true
+            ? audioProblem
+            : transcriptSaveFailed ? .transcriptSaveFailed : transcriptionFailed ? .transcriptionFailed : audioProblem
+    }
+
+    private func persistProblem() {
+        StoredRecordingProblem.save(problem, noteFolder: noteFolderURL)
     }
 
     /// Fires `onRecordingStopped` only after the pending-upload queue has
@@ -329,11 +653,13 @@ public final class RecordingController {
     /// empty one is skipped quietly downstream). A recording restarted
     /// during the wait swallows the trigger: no trigger while recording.
     private func notifyStoppedAfterTranscriptDrain() {
+        pendingStopNotification = true
         Task { [pipeline] in
+            defer { pendingStopNotification = false }
             _ = await TranscriptDrainWait.wait {
                 await pipeline.isTranscriptDrained
             }
-            guard status == .idle else { return }
+            guard status == .idle, !ApplicationQuitCoordinator.shared.isQuitting else { return }
             onRecordingStopped?()
         }
     }

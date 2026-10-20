@@ -355,7 +355,7 @@ struct NoteView: View {
         {
             transcriptFlash = CueFlash(row: row)
         }
-        if recorder.status == .idle && playback.hasAudio && !importer.decodingAudio {
+        if !recorder.status.isCapturing && playback.hasAudio && !importer.decodingAudio {
             playback.play(from: seconds)
         }
     }
@@ -381,29 +381,13 @@ struct NoteView: View {
                 StatusBanner(message: degraded)
                 Divider()
             }
-            // System-audio-denied banner (previously inside RecordingHeader):
-            // banners are banners — they all stack at the top of the pane.
-            if let banner = systemAudioBanner {
-                StatusBanner(
-                    message: banner,
-                    icon: "speaker.slash.fill",
-                    actionTitle: "Open System Settings"
-                ) {
-                    if let url = URL(
-                        string:
-                            "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture"
-                    ) {
-                        NSWorkspace.shared.open(url)
-                    }
-                }
-                Divider()
-            }
+            RecordingProblemBanner(recorder: recorder)
             RecordingStatusStrip(recorder: recorder)
             importStatusStrip
             // The player bar lives above the transcript whenever the note
             // has audio to play (hidden while recording — playing the note
             // back then would feed the speakers into the mic).
-            if (recorder.status == .idle && playback.hasAudio && !importer.decodingAudio) || Flags.uiPreview {
+            if (!recorder.status.isCapturing && playback.hasAudio && !importer.decodingAudio) || Flags.uiPreview {
                 PlaybackBar(
                     playback: playback, noteFolderURL: noteFolderURL,
                     hasTranscript: transcript.document != nil)
@@ -414,7 +398,7 @@ struct NoteView: View {
                 playbackPosition: playback.isPlaying ? playback.position : nil,
                 // Click a cue to play from it — same recording guard as
                 // the player bar.
-                onSeek: recorder.status == .idle && playback.hasAudio && !importer.decodingAudio
+                onSeek: !recorder.status.isCapturing && playback.hasAudio && !importer.decodingAudio
                     ? { playback.play(from: $0) } : nil,
                 onRenameSpeaker: { from, to in
                     do {

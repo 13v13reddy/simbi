@@ -21,12 +21,19 @@ public final class FileTreeModel {
         }
     }
     public private(set) var bootstrapError: Error?
+    public private(set) var operationError: String?
 
     private var watcher: FileTreeWatcher?
     private var selectedFileIdentifier: Data?
+    private let activeNoteFolders: () -> [URL]
 
-    public init(home: SimbiHome = SimbiHome()) {
+    public convenience init(home: SimbiHome = SimbiHome()) {
+        self.init(home: home, activeNoteFolders: { NoteFolderActivity.protectedFolders })
+    }
+
+    init(home: SimbiHome, activeNoteFolders: @escaping () -> [URL]) {
         self.home = home
+        self.activeNoteFolders = activeNoteFolders
     }
 
     public var selectedNode: FileTreeNode? {
@@ -168,6 +175,7 @@ public final class FileTreeModel {
     }
 
     public func rename(_ url: URL, to newName: String) {
+        guard allowMovingOrDeleting(url) else { return }
         do {
             let renamed = try NoteOperations.rename(url, to: newName)
             SidebarOrder.renamed(
@@ -188,6 +196,7 @@ public final class FileTreeModel {
     }
 
     public func trash(_ url: URL) {
+        guard allowMovingOrDeleting(url) else { return }
         let chatThreadIds = NoteChatStore.threadIds(under: url)
         do {
             try NoteOperations.trash(url)
@@ -218,8 +227,14 @@ public final class FileTreeModel {
     /// `childIndex` within the folder's displayed children (nil = append).
     /// Same-parent drops just reorder; cross-folder drops move on disk.
     /// Both persist the folder's order via `SidebarOrder`.
-    public func move(_ sources: [URL], into folder: URL, at childIndex: Int?) {
+    @discardableResult
+    public func move(_ sources: [URL], into folder: URL, at childIndex: Int?) -> Bool {
         let folderPath = folder.standardizedFileURL.path
+        // Preflight the whole drop: never move some items before discovering
+        // another contains a live recording. Reordering keeps paths intact.
+        for source in sources where source.deletingLastPathComponent().standardizedFileURL.path != folderPath {
+            guard allowMovingOrDeleting(source) else { return false }
+        }
         let children =
             folderPath == home.rootURL.standardizedFileURL.path
             ? nodes
@@ -254,10 +269,28 @@ public final class FileTreeModel {
                 retargetSelection(from: source, to: destination)
             }
         }
-        guard !movedNames.isEmpty else { return }
+        guard !movedNames.isEmpty else { return false }
         names.insert(contentsOf: movedNames, at: insertAt)
         SidebarOrder.write(names, in: folder)
         refresh()
+        return true
+    }
+
+    public func clearOperationError() { operationError = nil }
+
+    private func allowMovingOrDeleting(_ url: URL) -> Bool {
+        operationError = nil
+        guard let note = NoteFolderActivity.blockingNote(for: url, among: activeNoteFolders()) else {
+            guard AutosavingDocument.saveBeforeMoving(url) else {
+                operationError =
+                    "An editor in \(url.lastPathComponent) could not save. Resolve any save conflict and check folder access before renaming, moving, or deleting it."
+                return false
+            }
+            return true
+        }
+        operationError =
+            "\(note.lastPathComponent) is recording or finishing work. Stop recording and let transcription and AI notes finish before renaming, moving, or deleting it or its folder. If transcription failed, retry it first."
+        return false
     }
 
     /// Keeps the selection pointing at a moved item — including one nested

@@ -3,11 +3,11 @@ import Foundation
 /// WebVTT emission and strict parsing for `transcript.vtt`
 /// (SPEC.md §3.4, algorithm guide §9.3).
 ///
-/// The file is append-only: the header is written once, then each entry is
-/// one atomic append. NOTE payloads never contain `-->` (WebVTT forbids it
+/// Entries are added in order. TranscriptOutbox atomically replaces the
+/// file when adding an entry. NOTE payloads never contain `-->` (WebVTT forbids it
 /// inside comment blocks), hence the `key=value` forms.
 
-public enum VTTEntry: Equatable, Sendable {
+public enum VTTEntry: Codable, Equatable, Sendable {
     case cue(
         index: Int, start: TimeInterval, end: TimeInterval, speaker: String,
         text: String, continuation: Bool)

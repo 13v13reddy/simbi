@@ -5,6 +5,23 @@ import Testing
 
 @Suite("AutosavingDocument live file")
 struct AutosavingDocumentTests {
+    @Test("Quit flushes debounced edits and refuses unresolved conflicts")
+    @MainActor
+    func savesBeforeQuit() throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appending(path: "note.md")
+        try "old".write(to: file, atomically: true, encoding: .utf8)
+        let document = AutosavingDocument(fileURL: file)
+        document.text = "pending edit"
+        document.scheduleAutosave()
+        #expect(document.saveBeforeQuit())
+        #expect(try String(contentsOf: file, encoding: .utf8) == "pending edit")
+        document.text = "another edit"
+        try "external edit".write(to: file, atomically: true, encoding: .utf8)
+        #expect(!document.saveBeforeQuit())
+        #expect(try String(contentsOf: file, encoding: .utf8) == "external edit")
+    }
     @Test("a clean editor follows external changes and deletion")
     @MainActor
     func cleanEditorFollowsDisk() throws {

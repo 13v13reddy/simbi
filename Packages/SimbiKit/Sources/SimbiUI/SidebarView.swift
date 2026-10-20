@@ -67,6 +67,16 @@ struct SidebarView: View {
                 }
                 renameTarget = nil
             }
+            .alert(
+                "Note Could Not Be Changed",
+                isPresented: Binding(
+                    get: { model.operationError != nil },
+                    set: { if !$0 { model.clearOperationError() } })
+            ) {
+                Button("OK") { model.clearOperationError() }
+            } message: {
+                Text(model.operationError ?? "")
+            }
         }
     }
 

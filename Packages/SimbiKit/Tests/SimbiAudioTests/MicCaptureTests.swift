@@ -6,6 +6,19 @@ import Testing
 
 @Suite("MicCapture")
 struct MicCaptureTests {
+    @Test(
+        "uses the selected microphone's hardware format for capture",
+        .enabled(if: AudioInputDevices.defaultDeviceID() != nil))
+    func selectedInputUsesHardwareFormat() throws {
+        let engine = AVAudioMicInputEngine()
+        defer { engine.stop() }
+        let (input, captureFormat) = try engine.configureInput(deviceUID: nil)
+        let hardwareFormat = input.inputFormat(forBus: 0)
+
+        #expect(captureFormat.sampleRate == hardwareFormat.sampleRate)
+        #expect(captureFormat.channelCount == hardwareFormat.channelCount)
+    }
+
     @Test("continues streaming after the input device changes")
     func recoversAfterInputDeviceChange() async throws {
         let notifications = NotificationCenter()
@@ -60,8 +73,8 @@ struct MicCaptureTests {
         capture.stop()
     }
 
-    @Test("keeps the recording clock moving while the input reconnects")
-    func emitsTimingSilenceDuringRecovery() async throws {
+    @Test("does not pass synthesized silence off as microphone input during recovery")
+    func doesNotInventSamplesDuringRecovery() async throws {
         let notifications = NotificationCenter()
         let engine = FakeMicInputEngine()
         let capture = MicCapture(engine: engine, notificationCenter: notifications)
@@ -75,14 +88,8 @@ struct MicCaptureTests {
 
         engine.failNextStarts(10)
         engine.simulateConfigurationChange(on: notifications)
-        for _ in 0..<100 {
-            if await collector.count > 0 { break }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-
-        let firstBatch = await collector.first
-        #expect(firstBatch?.count == 1_024)
-        #expect(firstBatch?.allSatisfy { $0 == 0 } == true)
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(await collector.count == 0)
 
         capture.stop()
         await collectionTask.value

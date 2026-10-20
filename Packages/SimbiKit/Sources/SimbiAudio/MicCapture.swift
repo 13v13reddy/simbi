@@ -20,11 +20,8 @@ protocol MicInputEngine: AnyObject {
 /// an AsyncStream of sample batches. `MixedCapture` mixes this stream with
 /// the system-audio tap's.
 public final class MicCapture: @unchecked Sendable {
-    private static let recoveryFrameCount = 1_024
-    private static let recoveryFrameInterval: DispatchTimeInterval = .milliseconds(64)
-    private static let recoverySilence = [Float](repeating: 0, count: recoveryFrameCount)
-
     public enum CaptureError: Error {
+        case permissionDenied
         case converterUnavailable
         case inputUnavailable
         /// The requested device UID isn't connected (or refused selection).
@@ -36,7 +33,6 @@ public final class MicCapture: @unchecked Sendable {
     private let recoveryQueue = DispatchQueue(label: "app.getsimbi.mac.mic-recovery")
     private var continuation: AsyncStream<[Float]>.Continuation?
     private var configurationObserver: NSObjectProtocol?
-    private var recoveryClock: DispatchSourceTimer?
     private var retryWorkItem: DispatchWorkItem?
     private var retryAttempt = 0
     private var requestedDeviceUID: String?
@@ -97,7 +93,6 @@ public final class MicCapture: @unchecked Sendable {
     private func recoverAfterConfigurationChange() {
         recoveryQueue.async { [weak self] in
             guard let self, active, !engine.isRunning else { return }
-            startRecoveryClock()
             retryWorkItem?.cancel()
             retryWorkItem = nil
             retryAttempt = 0
@@ -110,7 +105,6 @@ public final class MicCapture: @unchecked Sendable {
         engine.stop()
         do {
             try startEngine()
-            stopRecoveryClock()
             retryAttempt = 0
             retryWorkItem = nil
             Log.recording.info("microphone capture recovered after audio device change")
@@ -136,29 +130,6 @@ public final class MicCapture: @unchecked Sendable {
             deadline: .now() + .milliseconds(delayMilliseconds), execute: workItem)
     }
 
-    /// `MixedCapture` uses microphone batches as its clock. Keep that clock
-    /// advancing with silence while the hardware input is unavailable so the
-    /// system-audio FIFO continues flowing and the note timeline stays intact.
-    private func startRecoveryClock() {
-        guard recoveryClock == nil else { return }
-        let timer = DispatchSource.makeTimerSource(queue: recoveryQueue)
-        timer.schedule(
-            deadline: .now() + Self.recoveryFrameInterval,
-            repeating: Self.recoveryFrameInterval,
-            leeway: .milliseconds(4))
-        timer.setEventHandler { [weak self] in
-            guard let self, active, !engine.isRunning else { return }
-            continuation?.yield(Self.recoverySilence)
-        }
-        recoveryClock = timer
-        timer.resume()
-    }
-
-    private func stopRecoveryClock() {
-        recoveryClock?.cancel()
-        recoveryClock = nil
-    }
-
     private func startEngine() throws {
         guard let continuation else { return }
         try engine.start(deviceUID: requestedDeviceUID) { samples in
@@ -168,7 +139,6 @@ public final class MicCapture: @unchecked Sendable {
 
     private func tearDown() {
         active = false
-        stopRecoveryClock()
         retryWorkItem?.cancel()
         retryWorkItem = nil
         retryAttempt = 0
@@ -186,16 +156,17 @@ public final class MicCapture: @unchecked Sendable {
 /// AVAudioEngine implementation used in production. Every start reads the
 /// current hardware format again, so a recovered engine gets a fresh tap and
 /// converter for the replacement input device.
-private final class AVAudioMicInputEngine: MicInputEngine, @unchecked Sendable {
+final class AVAudioMicInputEngine: MicInputEngine, @unchecked Sendable {
     private let engine = AVAudioEngine()
     private var tapInstalled = false
 
     var configurationChangeObject: AnyObject { engine }
     var isRunning: Bool { engine.isRunning }
 
-    func start(
-        deviceUID: String?, onSamples: @escaping @Sendable ([Float]) -> Void
-    ) throws {
+    /// Selects the device and returns the format used by the tap and converter.
+    /// Kept separate from starting capture so format negotiation can be tested
+    /// without opening a microphone recording.
+    func configureInput(deviceUID: String?) throws -> (AVAudioInputNode, AVAudioFormat) {
         let input = engine.inputNode
         // Must happen before the first format query — selecting the device
         // changes the input node's hardware format. Resolve the default on
@@ -218,10 +189,23 @@ private final class AVAudioMicInputEngine: MicInputEngine, @unchecked Sendable {
             }
         }
 
-        let inputFormat = input.outputFormat(forBus: 0)
+        // The output scope can retain the previous device's rate after
+        // selection (e.g. 96 kHz speakers and a 48 kHz mic). Input nodes
+        // cannot convert formats: the tap must match the hardware scope.
+        let inputFormat = input.inputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
             throw MicCapture.CaptureError.inputUnavailable
         }
+        return (input, inputFormat)
+    }
+
+    func start(
+        deviceUID: String?, onSamples: @escaping @Sendable ([Float]) -> Void
+    ) throws {
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+            throw MicCapture.CaptureError.permissionDenied
+        }
+        let (input, inputFormat) = try configureInput(deviceUID: deviceUID)
         guard
             let targetFormat = AudioResampling.pipelineFormat,
             let converter = AVAudioConverter(from: inputFormat, to: targetFormat)
@@ -229,15 +213,23 @@ private final class AVAudioMicInputEngine: MicInputEngine, @unchecked Sendable {
             throw MicCapture.CaptureError.converterUnavailable
         }
 
-        input.installTap(
-            onBus: 0, bufferSize: 1024, format: inputFormat
-        ) { buffer, _ in
+        let block: AVAudioNodeTapBlock = { buffer, _ in
             guard
                 let samples = AudioResampling.convert(
                     buffer, using: converter, to: targetFormat)
             else { return }
             onSamples(samples)
         }
+        #if compiler(>=6.4)
+            if #available(macOS 27.0, *) {
+                try input.__installTap(
+                    onBus: 0, bufferSize: 1024, format: inputFormat, error: (), block: block)
+            } else {
+                input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat, block: block)
+            }
+        #else
+            input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat, block: block)
+        #endif
         tapInstalled = true
 
         engine.prepare()

@@ -6,6 +6,8 @@ import SwiftUI
 /// `swift build` / `swift test` work headless (docs/SPEC.md §1).
 @main
 struct SimbiApp: App {
+    @NSApplicationDelegateAdaptor(SimbiApplicationDelegate.self) private var appDelegate
+
     init() {
         // The system "prefer tabs: always" setting auto-tabs a new window
         // into an existing group DURING creation, and SwiftUI (macOS 26)
@@ -13,6 +15,7 @@ struct SimbiApp: App {
         // stay permanently blank. Simbi's ancillary AppKit windows opt into
         // their own explicit behavior after their content exists.
         NSWindow.allowsAutomaticWindowTabbing = false
+        RecordingAlerts.install()
 
         // Starts Sparkle. It checks in the background and shows nothing until
         // the second launch, so this costs the first run nothing.

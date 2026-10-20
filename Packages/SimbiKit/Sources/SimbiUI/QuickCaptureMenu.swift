@@ -83,7 +83,7 @@ public final class QuickCaptureModel {
     /// Creates the note before starting capture, so the recording pipeline
     /// owns a real, durable folder from its first byte.
     public func start(in parent: URL) {
-        guard !RecordingActivity.shared.isRecording else { return }
+        guard !RecordingActivity.shared.isRecording, !ApplicationQuitCoordinator.shared.isQuitting else { return }
         lastError = nil
 
         let parent = parent.standardizedFileURL
@@ -117,6 +117,7 @@ public final class QuickCaptureModel {
                     summaryWorking: summary?.status == .working)
             }
             title.renameNote = { [weak self] newName in
+                guard NoteFolderActivity.blockingNote(for: noteURL) == nil else { return }
                 do {
                     let renamed = try NoteOperations.rename(noteURL, to: newName)
                     SidebarOrder.renamed(
@@ -131,13 +132,6 @@ public final class QuickCaptureModel {
             controller.startRecording()
             refresh()
 
-            // Surface a startup failure in the menubar instead of leaving an
-            // empty timestamped note with no explanation.
-            Task { @MainActor [weak self, weak controller] in
-                try? await Task.sleep(for: .seconds(1))
-                guard let controller, case .failed(let message) = controller.status else { return }
-                self?.lastError = message
-            }
         } catch {
             lastError = "Could not create the recording note: \(error.localizedDescription)"
         }
@@ -146,6 +140,11 @@ public final class QuickCaptureModel {
     public func stop() {
         guard let noteURL = RecordingActivity.shared.activeNoteURL else { return }
         RecordingController.shared(noteFolderURL: noteURL).toggle()
+    }
+
+    var canStop: Bool {
+        guard let url = RecordingActivity.shared.activeNoteURL else { return false }
+        return RecordingController.shared(noteFolderURL: url).canStop
     }
 
     private func isValidFolderDestination(_ url: URL) -> Bool {
@@ -192,16 +191,29 @@ public struct QuickCaptureMenuBarLabel: View {
 
     public init() {}
 
+    private var icon: String {
+        if activity.problem != nil { return "exclamationmark.triangle.fill" }
+        if activity.phase == .recording { return "record.circle.fill" }
+        return activity.isRecording ? "hourglass" : "waveform"
+    }
+
     public var body: some View {
-        Image(systemName: activity.isRecording ? "record.circle.fill" : "waveform")
+        Image(systemName: icon)
             .symbolRenderingMode(.hierarchical)
-            .accessibilityLabel(activity.isRecording ? "Recording" : "Start recording")
+            .foregroundStyle(activity.problem == nil ? AnyShapeStyle(.primary) : AnyShapeStyle(Color.statusWarning))
+            .accessibilityLabel(
+                activity.problem != nil
+                    ? "Recording needs attention"
+                    : activity.phase == .recording
+                        ? "Recording"
+                        : activity.isRecording ? "Starting or saving recording" : "Start recording")
     }
 }
 
 private struct QuickCaptureMenu: View {
     @Bindable private var model: QuickCaptureModel
     @Bindable private var activity: RecordingActivity
+    @Environment(\.openWindow) private var openWindow
 
     init(model: QuickCaptureModel, activity: RecordingActivity) {
         self.model = model
@@ -219,10 +231,12 @@ private struct QuickCaptureMenu: View {
                         model.recordingLabel,
                         systemImage: "record.circle.fill"
                     )
-                    .foregroundStyle(.red)
+                    .foregroundStyle(activity.phase == .recording ? Color.red : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                     Button("Stop Recording", systemImage: "stop.circle") {
                         model.stop()
                     }
+                    .disabled(!model.canStop)
                 }
             } else {
                 ForEach(folderDestinations) { destination in
@@ -232,6 +246,57 @@ private struct QuickCaptureMenu: View {
                     .toggleStyle(.checkbox)
                     .accessibilityLabel("Record in \(destination.path)")
                 }
+            }
+
+            if let alert = activity.problem {
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(
+                        alert.problem.isTranscriptProblem
+                            ? "Transcript needs attention"
+                            : alert.problem.isFatal ? "Recording stopped" : "Audio needs attention",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .foregroundStyle(Color.statusWarning)
+                    Text(alert.noteFolderURL.lastPathComponent)
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text(alert.problem.message)
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !alert.problem.isRecovered && alert.problem != .microphoneFallback {
+                        Button(
+                            alert.problem.retryTitle(isCapturing: activity.activeNoteURL == alert.noteFolderURL)
+                        ) {
+                            RecordingController.shared(noteFolderURL: alert.noteFolderURL).retryRecording()
+                        }
+                        .disabled(activity.phase == .stopping && activity.activeNoteURL == alert.noteFolderURL)
+                    }
+                    if let url = alert.problem.settingsURL {
+                        Button("Open System Settings") { NSWorkspace.shared.open(url) }
+                    }
+                    Button("Open Note") {
+                        RecordingAlertNavigation.shared.noteFolderURL = alert.noteFolderURL
+                        openWindow(id: SimbiWindow.mainID)
+                        NSApp.activate(ignoringOtherApps: true)
+                    }
+                    if !alert.problem.isTranscriptProblem
+                        && (activity.activeNoteURL != alert.noteFolderURL || alert.problem.isRecovered)
+                    {
+                        Button("Dismiss") {
+                            RecordingController.shared(noteFolderURL: alert.noteFolderURL).dismissProblem()
+                        }
+                    }
+                }
+            }
+
+            if activity.notificationsUnavailable {
+                Divider()
+                Button("Enable Recording Alerts…") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .help("Allow notifications to receive recording errors while Simbi is in the background")
             }
 
             if let error = model.lastError {
@@ -301,9 +366,15 @@ private struct FolderDestination: Identifiable {
 
 private extension QuickCaptureModel {
     var recordingLabel: String {
-        if let noteURL = RecordingActivity.shared.activeNoteURL {
-            return "Recording in \(noteURL.deletingLastPathComponent().lastPathComponent)/\(noteURL.lastPathComponent)…"
+        let phase: String
+        switch RecordingActivity.shared.phase {
+        case .preparing: phase = "Starting recording"
+        case .stopping: phase = "Saving recording"
+        default: phase = "Recording"
         }
-        return "Recording…"
+        if let noteURL = RecordingActivity.shared.activeNoteURL {
+            return "\(phase) in \(noteURL.deletingLastPathComponent().lastPathComponent)/\(noteURL.lastPathComponent)…"
+        }
+        return "\(phase)…"
     }
 }

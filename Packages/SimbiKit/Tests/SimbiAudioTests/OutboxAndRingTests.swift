@@ -47,6 +47,97 @@ struct TranscriptOutboxTests {
             .appending(path: "vtt-\(UUID().uuidString).vtt")
     }
 
+    @Test("recording and import completions share one ordered transcript writer")
+    func sharedProducerCompletions() async throws {
+        let folder = makeFile().deletingPathExtension()
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let recording = TranscriptOutbox.shared(noteFolderURL: folder)
+        let importing = TranscriptOutbox.shared(noteFolderURL: folder)
+        #expect(recording === importing)
+        for index in 1...30 {
+            try recording.reserveCue(
+                index: index, start: Double(index), end: Double(index + 1), speaker: "Speaker 1", continuation: false)
+        }
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for index in (1...30).reversed() {
+                let writer = index.isMultiple(of: 2) ? recording : importing
+                group.addTask { try writer.fulfillCue(index: index, text: "cue \(index)") }
+            }
+            try await group.waitForAll()
+        }
+        let document = try VTTParser.parse(String(contentsOf: VTT.fileURL(noteFolder: folder), encoding: .utf8))
+        let indices = document.entries.compactMap { entry -> Int? in
+            if case .cue(let index, _, _, _, _, _) = entry { return index }
+            return nil
+        }
+        #expect(indices == Array(1...30))
+        #expect(recording.isDrained)
+    }
+
+    @Test("a failed transcript write keeps its cue available for retry")
+    func failedWriteRetainsCue() throws {
+        let url = makeFile()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let outbox = TranscriptOutbox(fileURL: url, noteName: "Test")
+        try outbox.reserveCue(index: 1, start: 0, end: 2, speaker: "Speaker 1", continuation: false)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        #expect(throws: (any Error).self) { try outbox.fulfillCue(index: 1, text: "preserve this text") }
+        #expect(!outbox.isDrained)
+        try FileManager.default.removeItem(at: url)
+        try outbox.fulfillCue(index: 1, text: "preserve this text")
+        let document = try VTTParser.parse(String(contentsOf: url, encoding: .utf8))
+        #expect(document.entries.count == 1)
+        #expect(outbox.isDrained)
+    }
+
+    @Test("completed results survive reopening while an earlier cue is pending")
+    func completedResultsSurviveReopening() throws {
+        let folder = makeFile().deletingPathExtension()
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appending(path: "transcript.vtt")
+        let journal = folder.appending(path: "outbox.json")
+        let first = TranscriptOutbox(fileURL: url, noteName: "Test", journalURL: journal)
+        try first.reserveCue(index: 1, start: 0, end: 2, speaker: "Speaker 1", continuation: false)
+        try first.reserveCue(index: 2, start: 2, end: 4, speaker: "Speaker 2", continuation: false)
+        try first.fulfillCue(index: 2, text: "already transcribed")
+        let reopened = TranscriptOutbox(fileURL: url, noteName: "Test", journalURL: journal)
+        try reopened.fulfillCue(index: 1, text: "first")
+        let document = try VTTParser.parse(String(contentsOf: url, encoding: .utf8))
+        #expect(
+            document.entries == [
+                .cue(index: 1, start: 0, end: 2, speaker: "Speaker 1", text: "first", continuation: false),
+                .cue(
+                    index: 2, start: 2, end: 4, speaker: "Speaker 2", text: "already transcribed", continuation: false),
+            ])
+        #expect(reopened.isDrained)
+    }
+
+    @Test("replaying a cue committed before a crash keeps later edits and never duplicates it")
+    func replayAfterCommitBeforeAcknowledgment() throws {
+        let folder = makeFile().deletingPathExtension()
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appending(path: "transcript.vtt")
+        let journal = folder.appending(path: "outbox.json")
+        let outbox = TranscriptOutbox(fileURL: url, noteName: "Test", journalURL: journal)
+        try outbox.reserveCue(index: 1, start: 0, end: 2, speaker: "Speaker 1", continuation: false)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        #expect(throws: (any Error).self) { try outbox.fulfillCue(index: 1, text: "original result") }
+        let unacknowledged = try Data(contentsOf: journal)
+        try FileManager.default.removeItem(at: url)
+        try outbox.retry()
+        let edited = try String(contentsOf: url, encoding: .utf8).replacingOccurrences(
+            of: "original result", with: "user edit")
+        try edited.write(to: url, atomically: true, encoding: .utf8)
+        try unacknowledged.write(to: journal, options: .atomic)
+        let recovered = TranscriptOutbox(fileURL: url, noteName: "Test", journalURL: journal)
+        try recovered.retry()
+        #expect(try String(contentsOf: url, encoding: .utf8) == edited)
+        #expect(recovered.isDrained)
+    }
+
     @Test("cues append strictly in order regardless of completion order")
     func ordering() throws {
         let url = makeFile()
@@ -54,8 +145,8 @@ struct TranscriptOutboxTests {
         let outbox = TranscriptOutbox(fileURL: url, noteName: "Test")
 
         try outbox.append(.sessionStart(n: 1, wallClock: .now, offset: 0))
-        outbox.reserveCue(index: 1, start: 0, end: 4, speaker: "Speaker 1", continuation: false)
-        outbox.reserveCue(index: 2, start: 5, end: 9, speaker: "Speaker 2", continuation: false)
+        try outbox.reserveCue(index: 1, start: 0, end: 4, speaker: "Speaker 1", continuation: false)
+        try outbox.reserveCue(index: 2, start: 5, end: 9, speaker: "Speaker 2", continuation: false)
         try outbox.append(.gap(start: 9, end: 12))
 
         // Cue 2 completes first — nothing beyond the session note may
@@ -85,7 +176,7 @@ struct TranscriptOutboxTests {
         try outbox.append(.sessionStart(n: 1, wallClock: .now, offset: 0))
         _ = try VTTParser.parse(String(contentsOf: url, encoding: .utf8))
 
-        outbox.reserveCue(index: 1, start: 0, end: 2, speaker: "Speaker 1", continuation: false)
+        try outbox.reserveCue(index: 1, start: 0, end: 2, speaker: "Speaker 1", continuation: false)
         try outbox.fulfillCue(index: 1, text: "hello")
         _ = try VTTParser.parse(String(contentsOf: url, encoding: .utf8))
 

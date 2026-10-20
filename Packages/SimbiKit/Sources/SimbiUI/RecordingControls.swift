@@ -55,7 +55,7 @@ struct RecordingBar: View {
                         Image(systemName: "record.circle.fill")
                             .foregroundStyle(Color.statusLive)
                     case .preparing:
-                        Image(systemName: "record.circle")
+                        Image(systemName: recorder.canStop ? "stop.circle" : "hourglass")
                     case .recording, .stopping:
                         Image(systemName: "stop.circle")
                     }
@@ -64,7 +64,7 @@ struct RecordingBar: View {
             .font(.system(size: 18))
         }
         .buttonStyle(HoverCircleButtonStyle())
-        .disabled(recorder.status == .preparing || recorder.status == .stopping)
+        .disabled((recorder.status == .preparing && !recorder.canStop) || recorder.status == .stopping)
         .help(recordHelp)
         .accessibilityLabel(recordHelp)
     }
@@ -76,7 +76,7 @@ struct RecordingBar: View {
         case .idle, .failed:
             return recorder.hasRecording ? "Resume" : "Record"
         case .preparing:
-            return "Preparing…"
+            return recorder.canStop ? "Stop" : "Starting audio…"
         case .recording, .stopping:
             return "Stopping…"
         }
@@ -147,7 +147,7 @@ struct RecordingBar: View {
         .fixedSize()
         .padding(Design.footerStripPadding)
         .hoverFill(Capsule())
-        .disabled(recorder.status != .idle)
+        .disabled(recorder.status.isCapturing)
         .help(sourcesSummary)
     }
 
@@ -170,7 +170,7 @@ struct RecordingBar: View {
         if recorder.systemAudioEnabled {
             parts.append("system audio")
         }
-        return "Recording: " + parts.joined(separator: " + ")
+        return "Sources: " + parts.joined(separator: " + ")
     }
 }
 
@@ -195,7 +195,8 @@ struct RecordingStatusStrip: View {
     }
 
     private var hasContent: Bool {
-        isRecording || isFailed || Flags.uiPreview
+        isRecording || (isFailed && recorder.problem == nil)
+            || recorder.status == .preparing || recorder.status == .stopping || Flags.uiPreview
     }
 
     var body: some View {
@@ -214,7 +215,15 @@ struct RecordingStatusStrip: View {
         if isRecording {
             liveIndicator
         }
-        if case .failed(let message) = recorder.status {
+        if recorder.status == .preparing {
+            ProgressView().controlSize(.small)
+            Text("Checking audio…").font(.meta).foregroundStyle(.secondary)
+        }
+        if recorder.status == .stopping {
+            Text(recorder.problem == nil ? "Saving audio…" : "Closing recording…")
+                .font(.meta).foregroundStyle(.secondary)
+        }
+        if case .failed(let message) = recorder.status, recorder.problem == nil {
             Text(message)
                 .font(.meta)
                 .foregroundStyle(Color.statusLive)

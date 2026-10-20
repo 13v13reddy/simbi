@@ -34,6 +34,7 @@ public actor ImportPipeline {
     private let outbox: TranscriptOutbox
     private var running = false
     private var progressContinuation: AsyncStream<Progress>.Continuation?
+    private var latestProgress: Progress?
     /// Optional end-of-import fixer (media-import spec, amended): one pass
     /// over the whole imported transcript after the upload drain; failures
     /// never affect the import (degraded mode: fixing just doesn't happen).
@@ -58,15 +59,19 @@ public actor ImportPipeline {
 
     public init(
         noteFolderURL: URL, transcriber: Transcriber,
-        decoder: any MediaDecoding, analyzer: any OfflineAnalyzing
+        decoder: any MediaDecoding, analyzer: any OfflineAnalyzing,
+        outbox: TranscriptOutbox? = nil
     ) {
         self.noteFolderURL = noteFolderURL
         self.transcriber = transcriber
         self.decoder = decoder
         self.analyzer = analyzer
-        self.outbox = TranscriptOutbox(
-            fileURL: VTT.fileURL(noteFolder: noteFolderURL),
-            noteName: noteFolderURL.lastPathComponent)
+        self.outbox =
+            outbox
+            ?? TranscriptOutbox(
+                fileURL: VTT.fileURL(noteFolder: noteFolderURL),
+                noteName: noteFolderURL.lastPathComponent,
+                journalURL: NoteLayout.stateDirURL(noteFolder: noteFolderURL).appending(path: "transcript-outbox.json"))
     }
 
     public var isImporting: Bool { running }
@@ -78,11 +83,14 @@ public actor ImportPipeline {
         progressContinuation?.finish()
         return AsyncStream { continuation in
             self.progressContinuation = continuation
+            if let latestProgress { continuation.yield(latestProgress) }
         }
     }
 
     private func emit(_ fileName: String, _ stage: Progress.Stage) {
-        progressContinuation?.yield(Progress(fileName: fileName, stage: stage))
+        let progress = Progress(fileName: fileName, stage: stage)
+        latestProgress = progress
+        progressContinuation?.yield(progress)
     }
 
     /// Attaches the note's fixer before `run()` (nil = fixing disabled).
@@ -271,6 +279,13 @@ public actor ImportPipeline {
     private var uploadsTotal = 0
     private var activeFileName = ""
     private var drainContinuation: CheckedContinuation<Void, Never>?
+    private var transcriptWriteError: (any Error)?
+    private var failedUploads: Set<Int> = []
+    private var authRetryTask: Task<Void, Never>?
+    public var hasTranscriptionFailures: Bool {
+        failedUploads.subtract((try? outbox.committedCueIndices()) ?? [])
+        return !failedUploads.isEmpty || !((try? PendingSegment.failedCueIndices(in: pendingDirURL)) ?? []).isEmpty
+    }
     private static let uploadMaxAttempts = 3
     private static let uploadBackoff: [Duration] = [.seconds(1), .seconds(4)]
     private static let authRetryDelay: Duration = .seconds(30)
@@ -294,6 +309,7 @@ public actor ImportPipeline {
         activeFileName = fileName
         uploadsTotal = entries.reduce(0) { if case .block = $1 { $0 + 1 } else { $0 } }
         uploadsDone = 0
+        transcriptWriteError = nil
         try outbox.append(.sessionStart(n: session, wallClock: .now, offset: baseSec))
         for entry in entries {
             switch entry {
@@ -319,27 +335,31 @@ public actor ImportPipeline {
                     speaker: block.speaker, continuation: false)
                 try PersistedJSON.encoder().encode(sidecar)
                     .write(to: pendingDirURL.appending(path: "\(cueIndex).json"), options: .atomic)
-                outbox.reserveCue(
+                try outbox.reserveCue(
                     index: cueIndex, start: start, end: end,
                     speaker: SpeakerLabel.name(slot: block.speaker), continuation: false)
-                remainingUploads += 1
-                enqueueUpload(cueIndex)
+                if enqueueUpload(cueIndex) { remainingUploads += 1 }
             }
         }
         try outbox.append(.sessionEnd(n: session, wallClock: .now, offset: endSec))
         emit(fileName, .transcribing(done: 0, total: uploadsTotal))
-        await waitForDrain()
+        try await waitForDrain()
     }
 
     /// Relaunch recovery for a phase-2 marker: re-enqueue pending segments,
     /// drain, clear the marker. No-op without a phase-2 marker.
-    public func resumePhase2() async throws {
+    public func resumePhase2(retryFailures: Bool = false) async throws {
         guard !running else { return }
         let state = NoteRecordingState.current(noteFolder: noteFolderURL)
         guard let active = state.activeImport, active.phase == 2 else { return }
         running = true
         defer { running = false }
         activeFileName = active.fileName
+        transcriptWriteError = nil
+        try outbox.retry()
+        let committed = try outbox.committedCueIndices()
+        try outbox.removeCommittedSegments(from: pendingDirURL)
+        if hasTranscriptionFailures && !retryFailures { throw ImportPipelineError.transcriptionFailed }
         let pendingIndices =
             ((try? FileManager.default.contentsOfDirectory(
                 at: pendingDirURL, includingPropertiesForKeys: nil)) ?? [])
@@ -350,16 +370,18 @@ public actor ImportPipeline {
             uploadsTotal = pendingIndices.count
             uploadsDone = 0
             for cueIndex in pendingIndices {
+                if committed.contains(cueIndex) { continue }
                 let jsonURL = pendingDirURL.appending(path: "\(cueIndex).json")
                 guard let data = try? Data(contentsOf: jsonURL),
                     let sidecar = try? JSONDecoder().decode(PendingSegment.self, from: data)
                 else { continue }
-                outbox.reserveCue(
+                try outbox.reserveCue(
                     index: sidecar.cueIndex, start: sidecar.startSec, end: sidecar.endSec,
                     speaker: SpeakerLabel.name(slot: sidecar.speaker),
                     continuation: sidecar.continuation)
-                remainingUploads += 1
-                enqueueUpload(sidecar.cueIndex)
+                if try !outbox.hasResult(index: sidecar.cueIndex) {
+                    if enqueueUpload(sidecar.cueIndex) { remainingUploads += 1 }
+                }
             }
             // The in-memory session-end note died with the crashed process;
             // close the session behind the re-enqueued cues (same move as
@@ -368,7 +390,7 @@ public actor ImportPipeline {
                 .sessionEnd(
                     n: state.sessionCount, wallClock: state.lastSessionEnd ?? .now,
                     offset: Self.seconds(state.totalSamples)))
-            await waitForDrain()
+            try await waitForDrain()
         }
         try NoteRecordingState.update(noteFolder: noteFolderURL) { state in
             if let name = state.activeImport?.fileName {
@@ -379,16 +401,46 @@ public actor ImportPipeline {
         emit(active.fileName, .finished)
     }
 
-    private func waitForDrain() async {
-        guard remainingUploads > 0 else { return }
-        await withCheckedContinuation { continuation in
-            drainContinuation = continuation
+    private func waitForDrain() async throws {
+        if remainingUploads > 0 {
+            await withCheckedContinuation { continuation in
+                drainContinuation = continuation
+            }
+        }
+        if let transcriptWriteError { throw transcriptWriteError }
+        if hasTranscriptionFailures { throw ImportPipelineError.transcriptionFailed }
+        // A previous recording can still own the head of the shared outbox.
+        // Finished uploads do not imply that this import's cues reached disk.
+        while !outbox.isDrained {
+            if let transcriptWriteError { throw transcriptWriteError }
+            if hasTranscriptionFailures { throw ImportPipelineError.transcriptionFailed }
+            try await Task.sleep(for: .milliseconds(50))
         }
     }
 
-    private func enqueueUpload(_ cueIndex: Int) {
+    public func retryTranscriptSaving() throws {
+        try outbox.retry()
+        try outbox.removeCommittedSegments(from: pendingDirURL)
+        transcriptWriteError = nil
+    }
+
+    public func retryTranscription() throws {
+        authRetryTask?.cancel()
+        authRetryTask = nil
+        uploadsPaused = false
+        try outbox.retry()
+        for cue in try PendingSegment.failedCueIndices(in: pendingDirURL) {
+            if try !outbox.hasResult(index: cue), enqueueUpload(cue) { remainingUploads += 1 }
+        }
+        kickUploads()
+    }
+
+    @discardableResult
+    private func enqueueUpload(_ cueIndex: Int) -> Bool {
+        guard outbox.claimUpload(index: cueIndex) else { return false }
         uploadQueue.append(cueIndex)
         kickUploads()
+        return true
     }
 
     private func kickUploads() {
@@ -403,13 +455,9 @@ public actor ImportPipeline {
 
     private func runUpload(cueIndex: Int) async {
         let webmURL = pendingDirURL.appending(path: "\(cueIndex).webm")
-        let jsonURL = pendingDirURL.appending(path: "\(cueIndex).json")
         for attempt in 1...Self.uploadMaxAttempts {
             do {
                 let text = try await transcriber.transcribe(webmFile: webmURL)
-                for url in [webmURL, jsonURL] {
-                    try? FileManager.default.removeItem(at: url)
-                }
                 uploadFinished(cueIndex: cueIndex, text: text)
                 return
             } catch let error as TranscriptionClient.TranscriptionError {
@@ -425,25 +473,42 @@ public actor ImportPipeline {
                 try? await Task.sleep(for: Self.uploadBackoff[attempt - 1])
             }
         }
-        Log.recording.error(
-            "import cue \(cueIndex) failed after \(Self.uploadMaxAttempts) attempts; [inaudible]")
-        let failedDir = NoteLayout.failedDirURL(noteFolder: noteFolderURL)
-        try? FileManager.default.createDirectory(at: failedDir, withIntermediateDirectories: true)
-        for url in [webmURL, jsonURL] {
-            try? FileManager.default.moveItem(
-                at: url, to: failedDir.appending(path: url.lastPathComponent))
+        markTranscriptionFailure(cueIndex)
+        RecordingDiagnostics.error("import cue \(cueIndex) transcription failed after bounded retries; audio retained")
+        uploadCompleted(cueIndex: cueIndex)
+    }
+
+    private func markTranscriptionFailure(_ cueIndex: Int) {
+        failedUploads.insert(cueIndex)
+        do { try PendingSegment.markTranscriptionFailure(true, cue: cueIndex, in: pendingDirURL) } catch {
+            transcriptWriteError = error
         }
-        uploadFinished(cueIndex: cueIndex, text: "[inaudible]")
+        emit(
+            activeFileName,
+            .failed(
+                "Transcription is unavailable. Check your connection and ChatGPT sign-in, then retry transcription. Audio is saved."
+            ))
     }
 
     private func uploadFinished(cueIndex: Int, text: String) {
+        failedUploads.remove(cueIndex)
         do {
             try outbox.fulfillCue(index: cueIndex, text: text)
+            if FileManager.default.fileExists(atPath: pendingDirURL.appending(path: "\(cueIndex).json").path) {
+                try PendingSegment.markTranscriptionFailure(false, cue: cueIndex, in: pendingDirURL)
+            }
+            try outbox.removeCommittedSegments(from: pendingDirURL)
         } catch {
-            Log.recording.error("appending import cue \(cueIndex) failed: \(error)")
+            transcriptWriteError = error
+            RecordingDiagnostics.error("saving import cue \(cueIndex) failed; queued audio retained: \(error)")
         }
-        uploadsInFlight -= 1
         uploadsDone += 1
+        uploadCompleted(cueIndex: cueIndex)
+    }
+
+    private func uploadCompleted(cueIndex: Int) {
+        outbox.releaseUpload(index: cueIndex)
+        uploadsInFlight -= 1
         remainingUploads -= 1
         emit(activeFileName, .transcribing(done: uploadsDone, total: uploadsTotal))
         kickUploads()
@@ -454,12 +519,13 @@ public actor ImportPipeline {
     }
 
     private func pauseUploads(requeuing cueIndex: Int) {
+        markTranscriptionFailure(cueIndex)
         uploadQueue.insert(cueIndex, at: 0)
         uploadsInFlight -= 1
         guard !uploadsPaused else { return }
         uploadsPaused = true
-        Task {
-            try? await Task.sleep(for: Self.authRetryDelay)
+        authRetryTask = Task {
+            do { try await Task.sleep(for: Self.authRetryDelay) } catch { return }
             self.resumeUploads()
         }
     }
@@ -505,6 +571,7 @@ public actor ImportPipeline {
 }
 
 public enum ImportPipelineError: Error, Equatable {
+    case transcriptionFailed
     case importAlreadyRunning
     case audioFileMismatch
     case noAudio

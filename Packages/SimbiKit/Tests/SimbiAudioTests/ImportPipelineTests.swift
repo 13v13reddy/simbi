@@ -324,7 +324,7 @@ struct ImportPipelinePhase2Tests {
         #expect(await log.maxInFlight > 1)
     }
 
-    @Test("a terminally failed block renders [inaudible] and moves to failed/")
+    @Test("a failed import stays pending and retry preserves successful results in order")
     func terminalFailure() async throws {
         let note = try makeNote()
         defer { try? FileManager.default.removeItem(at: note) }
@@ -335,15 +335,30 @@ struct ImportPipelinePhase2Tests {
             transcriber: CountingTranscriber(log: log, failCues: [1]),
             decoder: FakeDecoder(batches: [audio], thenThrow: false),
             analyzer: FakeAnalyzer(records: twoSpeakerRecords))
-        try await pipeline.run(fileURL: mediaURL("meeting.m4a"))
+        await #expect(throws: ImportPipelineError.transcriptionFailed) {
+            try await pipeline.run(fileURL: mediaURL("meeting.m4a"))
+        }
         let text = try String(contentsOf: VTT.fileURL(noteFolder: note), encoding: .utf8)
-        #expect(text.contains("[inaudible]"))
-        let failed = try FileManager.default.contentsOfDirectory(
-            atPath: NoteLayout.failedDirURL(noteFolder: note).path)
-        #expect(failed.contains("1.webm") && failed.contains("1.json"))
-        // Import still completes; the timeline stays whole.
-        #expect(
-            try NoteRecordingState.load(noteFolder: note).imports["meeting.m4a"]?.status == .done)
+        #expect(!text.contains("[inaudible]"))
+        let pending = try FileManager.default.contentsOfDirectory(
+            atPath: NoteLayout.pendingDirURL(noteFolder: note).path)
+        #expect(pending.contains("1.webm") && pending.contains("1.json"))
+        #expect(try NoteRecordingState.load(noteFolder: note).activeImport?.phase == 2)
+        let retryLog = UploadLog()
+        let recovering = ImportPipeline(
+            noteFolderURL: note, transcriber: CountingTranscriber(log: retryLog, failCues: []),
+            decoder: FakeDecoder(batches: [], thenThrow: false), analyzer: FakeAnalyzer(records: []))
+        await #expect(throws: ImportPipelineError.transcriptionFailed) { try await recovering.resumePhase2() }
+        try await recovering.resumePhase2(retryFailures: true)
+        #expect(await retryLog.served == [1])
+        #expect(try NoteRecordingState.load(noteFolder: note).activeImport == nil)
+        #expect(try NoteRecordingState.load(noteFolder: note).imports["meeting.m4a"]?.status == .done)
+        let recovered = try VTTParser.parse(String(contentsOf: VTT.fileURL(noteFolder: note), encoding: .utf8))
+        let cues = recovered.entries.compactMap { entry -> Int? in
+            if case .cue(let index, _, _, _, _, _) = entry { return index }
+            return nil
+        }
+        #expect(cues == [1, 2])
     }
 
     @Test("resumePhase2 drains pending segments left by a crash")

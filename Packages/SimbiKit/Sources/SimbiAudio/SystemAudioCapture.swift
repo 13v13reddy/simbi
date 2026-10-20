@@ -91,7 +91,10 @@ public final class SystemAudioCapture: @unchecked Sendable {
                 kAudioAggregateDeviceNameKey: "Simbi System Audio Tap",
                 kAudioAggregateDeviceUIDKey: UUID().uuidString,
                 kAudioAggregateDeviceIsPrivateKey: true,
-                kAudioAggregateDeviceTapAutoStartKey: true,
+                // Start the IO clock even when no app is playing audio.
+                // `true` waits for playback, so the source watchdog would
+                // exhaust its retries during ordinary system silence.
+                kAudioAggregateDeviceTapAutoStartKey: false,
                 kAudioAggregateDeviceTapListKey: [
                     [
                         kAudioSubTapUIDKey: description.uuid.uuidString,

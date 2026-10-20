@@ -92,6 +92,12 @@ public struct SimbiRootView: View {
                 .keyboardShortcut("n", modifiers: .command)
             }
         }
+        .onChange(of: RecordingAlertNavigation.shared.noteFolderURL, initial: true) { _, url in
+            guard let url else { return }
+            model.refresh()
+            model.selection = url
+            RecordingAlertNavigation.shared.noteFolderURL = nil
+        }
         // Creating the shared client at launch arms AppServerJanitor's
         // quit cleanup: quitting must kill every running codex server —
         // including older sessions' orphans. Project reconciliation also

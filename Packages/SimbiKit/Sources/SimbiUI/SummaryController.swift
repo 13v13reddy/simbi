@@ -61,6 +61,10 @@ public final class SummaryController {
         controllers.value(for: noteFolderURL, make: SummaryController.init(noteFolderURL:))
     }
 
+    static var protectedNoteFolders: [URL] {
+        controllers.all.filter { $0.status == .working }.map(\.noteFolderURL)
+    }
+
     private(set) var status: Status = .idle
     /// Bumps after each successful generation; the note view reloads the
     /// AI Notes document (rewritten on disk by the summarizer thread)

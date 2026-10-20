@@ -8,6 +8,20 @@ import SimbiKit
 @MainActor
 @Observable
 final class AutosavingDocument {
+    private static let documents = NSHashTable<AutosavingDocument>.weakObjects()
+
+    static func saveAllBeforeQuit() -> Bool {
+        documents.allObjects.map { $0.saveBeforeQuit() }.allSatisfy { $0 }
+    }
+
+    static func saveBeforeMoving(_ folder: URL) -> Bool {
+        let path = folder.standardizedFileURL.path
+        return documents.allObjects.filter {
+            let file = $0.fileURL.standardizedFileURL.path
+            return file == path || file.hasPrefix(path + "/")
+        }.map { $0.saveBeforeQuit() }.allSatisfy { $0 }
+    }
+
     private enum DiskSnapshot: Equatable {
         case missing
         case contents(String)
@@ -41,6 +55,12 @@ final class AutosavingDocument {
             [weak self] in
             self?.refreshFromDisk()
         }
+        Self.documents.add(self)
+    }
+
+    func saveBeforeQuit() -> Bool {
+        saveNow()
+        return !hasConflict && text == diskSnapshot.text
     }
 
     /// Debounced autosave; a pending save is superseded by the next edit.

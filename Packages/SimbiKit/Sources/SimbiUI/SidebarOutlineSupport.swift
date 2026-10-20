@@ -225,8 +225,7 @@ final class SidebarDropReceiver: @preconcurrency DropReceiver {
                 childIndex = nil
             }
         }
-        model.move(target.items.map { $0.item.url }, into: folder, at: childIndex)
-        return true
+        return model.move(target.items.map { $0.item.url }, into: folder, at: childIndex)
     }
 
     private func parentFolder(of node: FileTreeNode) -> FileTreeNode? {

@@ -23,17 +23,29 @@ public final class RecordingActivity {
     /// The note currently capturing, if any. Used by the menubar control to
     /// offer a one-click stop and to show where the recording is going.
     public private(set) var activeNoteURL: URL?
+    public private(set) var phase: RecordingController.Status?
+    public private(set) var problem: RecordingAlert?
+    public var notificationsUnavailable = false
 
-    private init() {}
+    init() {}
 
     func refresh() {
         let live = RecordingController.isAnyRecording
         activeNoteURL = RecordingController.activeNoteFolderURL
+        phase = RecordingController.activeStatus
         guard live != isRecording else { return }
         isRecording = live
         if !live {
             NotificationCenter.default.post(name: .simbiRecordingDidEnd, object: nil)
         }
+    }
+
+    func report(_ problem: RecordingProblem, noteFolderURL: URL) {
+        self.problem = RecordingAlert(noteFolderURL: noteFolderURL, problem: problem)
+    }
+
+    func clearProblem(noteFolderURL: URL) {
+        if problem?.noteFolderURL == noteFolderURL { problem = nil }
     }
 }
 
