@@ -202,7 +202,9 @@ public struct NoteRecordingState: Codable, Equatable, Sendable {
     {
         ioLock.lock()
         defer { ioLock.unlock() }
-        var state = current(noteFolder: noteFolder)
+        // Display callers may use `current`'s fallback. Writers must preserve
+        // unreadable bookkeeping instead of replacing it with a fresh timeline.
+        var state = try load(noteFolder: noteFolder)
         mutate(&state)
         try state.save(noteFolder: noteFolder)
     }
@@ -213,11 +215,10 @@ public struct NoteRecordingState: Codable, Equatable, Sendable {
     public mutating func saveRecording(noteFolder: URL) throws {
         Self.ioLock.lock()
         defer { Self.ioLock.unlock() }
-        if let disk = try? Self.load(noteFolder: noteFolder) {
-            conversions = disk.conversions
-            imports = disk.imports
-            activeImport = disk.activeImport
-        }
+        let disk = try Self.load(noteFolder: noteFolder)
+        conversions = disk.conversions
+        imports = disk.imports
+        activeImport = disk.activeImport
         try save(noteFolder: noteFolder)
     }
 }

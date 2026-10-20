@@ -209,6 +209,35 @@ struct RecordingHealthTests {
         #expect(!generated)
     }
 
+    @Test("Quit retries a failed final state save after folder access is restored", arguments: [false, true])
+    func retriesFailedQuitFinalization(retryRecording: Bool) async throws {
+        let folder = try folder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let (recorder, pipeline) = controller(folder: folder, source: HealthInput(), notices: HealthNotices())
+        recorder.startRecording()
+        try await waitUntil { recorder.status == .recording }
+        let stateURL = NoteRecordingState.fileURL(noteFolder: folder)
+        let backup = folder.appending(path: "state-before-failed-quit.json")
+        try FileManager.default.moveItem(at: stateURL, to: backup)
+        try FileManager.default.createDirectory(at: stateURL, withIntermediateDirectories: true)
+        #expect(await !recorder.finishForQuit())
+        #expect(await !pipeline.isRecording)
+        let audio = NoteLayout.audioURL(noteFolder: folder)
+        let savedAudio = try Data(contentsOf: audio)
+        if retryRecording {
+            recorder.startRecording()
+            try await waitUntil { if case .failed = recorder.status { true } else { false } }
+            #expect(try Data(contentsOf: audio) == savedAudio)
+        }
+        try FileManager.default.removeItem(at: stateURL)
+        try FileManager.default.moveItem(at: backup, to: stateURL)
+        #expect(await recorder.finishForQuit())
+        let state = try NoteRecordingState.load(noteFolder: folder)
+        #expect(state.activeSession == nil)
+        #expect(state.sessionCount == 1)
+        #expect(state.totalSamples > 0)
+    }
+
     @Test("Quit cancels preparation without allowing a late ghost recording")
     func quitDuringPreparation() async throws {
         let folder = try folder()

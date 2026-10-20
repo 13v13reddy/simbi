@@ -45,7 +45,7 @@ public final class RecordingController {
 
     static var protectedNoteFolders: [URL] {
         controllers.all.filter {
-            $0.status.isCapturing || $0.isFinalizing || $0.pendingStopNotification
+            $0.status.isCapturing || $0.isFinalizing || $0.finalizationFailed || $0.pendingStopNotification
                 || $0.pipeline.hasPendingTranscriptWork
                 || $0.fixerActivity.status == .working || $0.fixerActivity.status == .waiting
         }.map(\.noteFolderURL)
@@ -53,7 +53,8 @@ public final class RecordingController {
 
     static func finishAllForQuit() async -> Bool {
         var saved = true
-        for controller in controllers.all where controller.status.isCapturing || controller.isFinalizing {
+        for controller in controllers.all
+        where controller.status.isCapturing || controller.isFinalizing || controller.finalizationFailed {
             if !(await controller.finishForQuit()) { saved = false }
         }
         return saved
@@ -64,7 +65,15 @@ public final class RecordingController {
             await finish(failure: nil, waitForPreparation: status == .preparing && capture == nil, forQuit: true)
         }
         while isFinalizing { try? await Task.sleep(for: .milliseconds(20)) }
-        if case .failed = status { return false }
+        // A previous Quit may have closed the encoder before its final state
+        // write failed. Retry that retained work even when status is .failed.
+        do {
+            try await pipeline.abort(runFixer: false)
+            finalizationFailed = false
+        } catch {
+            finalizationFailed = true
+            return false
+        }
         guard let state = try? NoteRecordingState.load(noteFolder: noteFolderURL) else { return false }
         return state.activeSession == nil
     }
@@ -146,6 +155,7 @@ public final class RecordingController {
         }
     }
     private(set) var isFinalizing = false
+    private var finalizationFailed = false
     var canStop: Bool { capture != nil && !isFinalizing }
     var canRetry: Bool { !isFinalizing && (status == .idle || !status.isCapturing) }
 
@@ -620,11 +630,16 @@ public final class RecordingController {
             } else {
                 try await pipeline.stop(runFixer: !forQuit)
             }
+            finalizationFailed = false
         } catch {
             RecordingDiagnostics.error("finalizing recording failed: \(error)")
             terminalFailure = terminalFailure ?? .recordingFailed
             audioProblem = terminalFailure
-            do { try await pipeline.abort(runFixer: !forQuit) } catch {
+            do {
+                try await pipeline.abort(runFixer: !forQuit)
+                finalizationFailed = false
+            } catch {
+                finalizationFailed = true
                 RecordingDiagnostics.error("preserving partial recording failed: \(error)")
             }
         }

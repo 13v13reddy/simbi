@@ -28,6 +28,7 @@ public actor RecordingPipeline: TranscriptFixerHost {
         }
     }
     private var failedUploads: Set<Int> = []
+    private var unreservedCues: Set<Int> = []
     private var authRetryTask: Task<Void, Never>?
 
     private var state: NoteRecordingState
@@ -40,6 +41,9 @@ public actor RecordingPipeline: TranscriptFixerHost {
     private var sessionNumber = 0
     private var recording = false
     private var preparingID: UUID?
+    /// Retain cleanup work after the encoder closes: a failed state/journal
+    /// write must be retried even though no hardware or encoder remains open.
+    private var finalizationPending = false
 
     /// Wrapped-model result queues (§3): one verdict per completed 256 ms
     /// VAD chunk, and 4 probabilities per finalized Sortformer frame. The
@@ -235,6 +239,7 @@ public actor RecordingPipeline: TranscriptFixerHost {
 
     public func start() async throws {
         guard !recording, preparingID == nil else { throw RecordingPipelineError.alreadyRecording }
+        if finalizationPending { try await abort(runFixer: false) }
         let preparation = UUID()
         preparingID = preparation
         defer { if preparingID == preparation { preparingID = nil } }
@@ -242,7 +247,9 @@ public actor RecordingPipeline: TranscriptFixerHost {
         try validatePreparation(preparation)
         try await vad.prepare()
         try validatePreparation(preparation)
-        state = NoteRecordingState.current(noteFolder: noteFolderURL)
+        // A read failure is not a new note: defaulting here could reopen
+        // audio.webm in create mode and erase a surviving recording.
+        state = try NoteRecordingState.load(noteFolder: noteFolderURL)
 
         if state.activeSession != nil {
             try recoverFromCrash()
@@ -290,6 +297,7 @@ public actor RecordingPipeline: TranscriptFixerHost {
                 audioFileURL, .append(baseMilliseconds: UInt64(expectedMs)))
         }
 
+        finalizationPending = true
         writeProgress.opened(bytes: try audioFileBytes())
         try FileManager.default.createDirectory(
             at: pendingDirURL, withIntermediateDirectories: true)
@@ -456,10 +464,19 @@ public actor RecordingPipeline: TranscriptFixerHost {
             Log.recording.error(
                 "saving nextCueIndex \(state.nextCueIndex) to state.json failed: \(error)")
         }
-        try outbox.reserveCue(
-            index: cueIndex, start: startSec, end: endSec,
-            speaker: SpeakerLabel.name(slot: speakerSlot),
-            continuation: false)
+        do {
+            try outbox.reserveCue(
+                index: cueIndex, start: startSec, end: endSec,
+                speaker: SpeakerLabel.name(slot: speakerSlot),
+                continuation: false)
+        } catch {
+            // The segment and sidecar are already durable. Retry can reserve
+            // their transcript slot later without interrupting healthy audio.
+            unreservedCues.insert(cueIndex)
+            transcriptSaveFailed = true
+            RecordingDiagnostics.error("saving cue \(cueIndex) reservation failed; audio retained for retry: \(error)")
+            return
+        }
         if inspector.isActive {
             inspector.uploadEvents.append(
                 .queued(
@@ -481,7 +498,8 @@ public actor RecordingPipeline: TranscriptFixerHost {
     /// even when another fails, leaving crash recovery available on a full disk.
     public func abort(runFixer: Bool = true) async throws {
         preparingID = nil
-        guard encoder != nil || recording else { return }
+        guard encoder != nil || recording || finalizationPending else { return }
+        finalizationPending = true
         recording = false
         var failure: (any Error)?
         do { try encoder?.finish() } catch { failure = error }
@@ -504,6 +522,7 @@ public actor RecordingPipeline: TranscriptFixerHost {
         liveContinuation?.finish()
         liveContinuation = nil
         emitInspectorUpdate()
+        if failure == nil { finalizationPending = false }
         if runFixer { await fixer?.recordingStopped() }
         if let failure { throw failure }
     }
@@ -556,6 +575,7 @@ public actor RecordingPipeline: TranscriptFixerHost {
         state.lastSessionEnd = .now
         state.activeSession = nil
         try state.saveRecording(noteFolder: noteFolderURL)
+        finalizationPending = false
         // Final snapshot (recording == false); the stream stays open for
         // the late cue transcriptions.
         emitInspectorUpdate()
@@ -589,6 +609,7 @@ public actor RecordingPipeline: TranscriptFixerHost {
             .compactMap { Int($0.deletingPathExtension().lastPathComponent) }
             .sorted()
         failedUploads.subtract(committed)
+        unreservedCues.subtract(committed)
         var count = 0
         state.nextCueIndex = max(state.nextCueIndex, (pendingIndices.max() ?? 0) + 1, (committed.max() ?? 0) + 1)
         for cueIndex in pendingIndices where !trackedCues.contains(cueIndex) {
@@ -605,6 +626,7 @@ public actor RecordingPipeline: TranscriptFixerHost {
                 index: sidecar.cueIndex, start: sidecar.startSec, end: sidecar.endSec,
                 speaker: SpeakerLabel.name(slot: sidecar.speaker),
                 continuation: sidecar.continuation)
+            unreservedCues.remove(cueIndex)
             if sidecar.transcriptionFailed == true {
                 failedUploads.insert(cueIndex)
                 transcriptionFailed = true
@@ -787,7 +809,7 @@ extension RecordingPipeline {
                 try PendingSegment.markTranscriptionFailure(false, cue: cueIndex, in: pendingDirURL)
             }
             try outbox.removeCommittedSegments(from: pendingDirURL)
-            transcriptSaveFailed = false
+            transcriptSaveFailed = !unreservedCues.isEmpty
         } catch {
             transcriptSaveFailed = true
             RecordingDiagnostics.error("saving cue \(cueIndex) failed; queued audio retained: \(error)")

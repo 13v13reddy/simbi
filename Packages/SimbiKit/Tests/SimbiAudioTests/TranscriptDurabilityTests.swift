@@ -6,6 +6,118 @@ import Testing
 
 @Suite("Transcript durability")
 struct TranscriptDurabilityTests {
+    @Test("unreadable recording metadata cannot overwrite saved audio", arguments: [false, true])
+    func preservesAudioWithCorruptState(importing: Bool) async throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "transcript-corrupt-state-\(UUID())")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let audio = NoteLayout.audioURL(noteFolder: folder)
+        let encoder = try OpusWebMEncoder(fileURL: audio, mode: .create)
+        try encoder.append(samples: [Float](repeating: 0.3, count: 32_000))
+        try encoder.finish()
+        try NoteRecordingState(sessionCount: 1, totalSamples: 32_000).save(noteFolder: folder)
+        let savedAudio = try Data(contentsOf: audio)
+        let stateURL = NoteRecordingState.fileURL(noteFolder: folder)
+        let corruptState = Data("{incomplete state".utf8)
+        try corruptState.write(to: stateURL)
+        if importing {
+            let pipeline = ImportPipeline(
+                noteFolderURL: folder, transcriber: FakeTranscriber(),
+                decoder: DurabilityDecoder(), analyzer: DurabilityAnalyzer())
+            await #expect(throws: (any Error).self) {
+                try await pipeline.run(fileURL: folder.appending(path: "fixture.wav"))
+            }
+        } else {
+            let pipeline = RecordingPipeline(
+                noteFolderURL: folder, transcriber: FakeTranscriber(),
+                diarizer: FakeDiarizer { _ in .silence }, vad: FakeVad { _ in false })
+            await #expect(throws: (any Error).self) { try await pipeline.start() }
+            if await pipeline.isRecording { try await pipeline.abort(runFixer: false) }
+        }
+        #expect(try Data(contentsOf: audio) == savedAudio)
+        #expect(try Data(contentsOf: stateURL) == corruptState)
+    }
+
+    @Test("a failed cue journal write does not interrupt healthy audio capture")
+    func keepsRecordingAfterReservationFailure() async throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "transcript-live-reservation-\(UUID())")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let pipeline = RecordingPipeline(
+            noteFolderURL: folder, transcriber: FakeTranscriber(text: "speech retained during journal failure"),
+            diarizer: FakeDiarizer { $0 < 25 ? .speech(slot: 0) : .silence }, vad: FakeVad { $0 < 8 })
+        try await pipeline.start()
+        let journal = NoteLayout.stateDirURL(noteFolder: folder).appending(path: "transcript-outbox.json")
+        try FileManager.default.removeItem(at: journal)
+        try FileManager.default.createDirectory(at: journal, withIntermediateDirectories: true)
+        do {
+            try await pipeline.ingest(samples: [Float](repeating: 0.1, count: 160_000))
+        } catch {
+            Issue.record("Transcript journal failure interrupted audio ingestion: \(error)")
+        }
+        #expect(await pipeline.transcriptSaveFailed)
+        #expect(await pipeline.isRecording)
+        let saved = pipeline.writeProgress.snapshot.writtenSamples
+        try await pipeline.ingest(samples: [Float](repeating: 0, count: 16_000))
+        #expect(pipeline.writeProgress.snapshot.writtenSamples > saved)
+        try FileManager.default.removeItem(at: journal)
+        await pipeline.retryTranscriptSaving()
+        try await pipeline.stop(runFixer: false)
+        for _ in 0..<100 {
+            if await pipeline.isTranscriptDrained { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await pipeline.isTranscriptDrained)
+        #expect(
+            try String(contentsOf: VTT.fileURL(noteFolder: folder), encoding: .utf8)
+                .contains("speech retained during journal failure"))
+    }
+
+    @Test("an earlier upload cannot hide a later cue reservation failure")
+    func uploadCompletionPreservesReservationFailure() async throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "transcript-reservation-overlap-\(UUID())")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let transcriber = HeldTranscript()
+        let pipeline = RecordingPipeline(
+            noteFolderURL: folder, transcriber: transcriber,
+            diarizer: FakeDiarizer { $0 < 25 || (125..<150).contains($0) ? .speech(slot: 0) : .silence },
+            vad: FakeVad { $0 < 8 || (39..<47).contains($0) })
+        try await pipeline.start()
+        try await pipeline.ingest(samples: [Float](repeating: 0.1, count: 160_000))
+        for _ in 0..<100 {
+            if await transcriber.entered { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(await transcriber.entered)
+        let journal = NoteLayout.stateDirURL(noteFolder: folder).appending(path: "transcript-outbox.json")
+        try FileManager.default.removeItem(at: journal)
+        try FileManager.default.createDirectory(at: journal, withIntermediateDirectories: true)
+        try await pipeline.ingest(samples: [Float](repeating: 0.1, count: 160_000))
+        #expect(await pipeline.transcriptSaveFailed)
+        try FileManager.default.removeItem(at: journal)
+        await transcriber.complete()
+        for _ in 0..<100 {
+            let text = try String(contentsOf: VTT.fileURL(noteFolder: folder), encoding: .utf8)
+            if text.contains("result preserved through failure") { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await pipeline.transcriptSaveFailed)
+        await pipeline.retryTranscriptSaving()
+        for _ in 0..<100 {
+            if await transcriber.calls == 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await transcriber.calls == 2)
+        await transcriber.complete()
+        try await pipeline.stop(runFixer: false)
+        for _ in 0..<100 {
+            if await pipeline.isTranscriptDrained { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await pipeline.isTranscriptDrained)
+    }
+
     @Test("Retry recovers a recording cue whose journal reservation failed before upload")
     func retriesFailedCueReservation() async throws {
         let folder = FileManager.default.temporaryDirectory.appending(path: "transcript-reservation-\(UUID())")
@@ -19,8 +131,8 @@ struct TranscriptDurabilityTests {
         try FileManager.default.removeItem(at: journal)
         try FileManager.default.createDirectory(at: journal, withIntermediateDirectories: true)
         try await pipeline.ingest(samples: [Float](repeating: 0.1, count: 32_000))
-        await #expect(throws: (any Error).self) { try await pipeline.stop(runFixer: false) }
-        await #expect(throws: (any Error).self) { try await pipeline.abort(runFixer: false) }
+        try await pipeline.stop(runFixer: false)
+        #expect(await pipeline.transcriptSaveFailed)
         let pending = NoteLayout.pendingDirURL(noteFolder: folder)
         #expect(FileManager.default.fileExists(atPath: pending.appending(path: "1.json").path))
         try FileManager.default.removeItem(at: journal)
