@@ -6,6 +6,70 @@ import Testing
 
 @Suite("Transcript durability")
 struct TranscriptDurabilityTests {
+    @Test("damaged pending metadata is reported and retained until repaired", arguments: [false, true], [false, true])
+    func damagedPendingMetadataRemainsRecoverable(wrongIndex: Bool, importing: Bool) async throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "import-damaged-pending-\(UUID())")
+        let pending = NoteLayout.pendingDirURL(noteFolder: folder)
+        try FileManager.default.createDirectory(at: pending, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        for url in [NoteLayout.audioURL(noteFolder: folder), pending.appending(path: "1.webm")] {
+            let encoder = try OpusWebMEncoder(fileURL: url, mode: .create)
+            try encoder.append(samples: [Float](repeating: 0.1, count: 32_000))
+            try encoder.finish()
+        }
+        let savedAudio = try Data(contentsOf: NoteLayout.audioURL(noteFolder: folder))
+        let sidecarURL = pending.appending(path: "1.json")
+        let sidecar = PendingSegment(cueIndex: 1, startSec: 0, endSec: 2, speaker: 0, continuation: false)
+        if wrongIndex {
+            var damaged = sidecar
+            damaged.cueIndex = 2
+            try PersistedJSON.encoder().encode(damaged).write(to: sidecarURL)
+        } else {
+            try Data("{damaged sidecar".utf8).write(to: sidecarURL)
+        }
+        try NoteRecordingState(
+            nextCueIndex: 2, sessionCount: 1, totalSamples: 32_000,
+            activeImport: importing ? .init(fileName: "fixture.wav", n: 1, baseSamples: 0, phase: 2) : nil,
+            imports: importing ? ["fixture.wav": .init(status: .transcribing)] : [:]
+        ).save(noteFolder: folder)
+        let pipeline = ImportPipeline(
+            noteFolderURL: folder, transcriber: FakeTranscriber(text: "recovered pending metadata"),
+            decoder: DurabilityDecoder(), analyzer: DurabilityAnalyzer())
+        let recorder = RecordingPipeline(
+            noteFolderURL: folder, transcriber: FakeTranscriber(text: "recovered pending metadata"),
+            diarizer: FakeDiarizer { _ in .silence }, vad: FakeVad { _ in false })
+        if importing {
+            await #expect(throws: (any Error).self) { try await pipeline.resumePhase2() }
+            #expect(NoteRecordingState.current(noteFolder: folder).activeImport?.phase == 2)
+            #expect(NoteRecordingState.current(noteFolder: folder).imports["fixture.wav"]?.status != .done)
+        } else {
+            await recorder.retryTranscriptSaving()
+            #expect(await recorder.transcriptSaveFailed)
+        }
+        #expect(FileManager.default.fileExists(atPath: pending.appending(path: "1.webm").path))
+        try PersistedJSON.encoder().encode(sidecar).write(to: sidecarURL, options: .atomic)
+        if importing {
+            try await pipeline.resumePhase2()
+        } else {
+            await recorder.retryTranscriptSaving()
+            for _ in 0..<100 {
+                if await recorder.isTranscriptDrained { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(await !recorder.transcriptSaveFailed)
+            #expect(await recorder.isTranscriptDrained)
+        }
+        #expect(NoteRecordingState.current(noteFolder: folder).activeImport == nil)
+        #expect(
+            try String(contentsOf: VTT.fileURL(noteFolder: folder), encoding: .utf8)
+                .contains("recovered pending metadata"))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: pending.path).isEmpty)
+        #expect(try Data(contentsOf: NoteLayout.audioURL(noteFolder: folder)) == savedAudio)
+        let document = try VTTParser.parse(String(contentsOf: VTT.fileURL(noteFolder: folder), encoding: .utf8))
+        #expect(
+            document.entries.compactMap { if case .cue(let index, _, _, _, _, _) = $0 { index } else { nil } } == [1])
+    }
+
     @Test(
         "unreadable or missing recording metadata cannot overwrite saved audio", arguments: [false, true],
         [false, true])

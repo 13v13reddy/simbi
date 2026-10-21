@@ -620,9 +620,7 @@ public actor RecordingPipeline: TranscriptFixerHost {
         for cueIndex in pendingIndices where !trackedCues.contains(cueIndex) {
             if committed.contains(cueIndex) { continue }
             let jsonURL = pendingDirURL.appending(path: "\(cueIndex).json")
-            guard let data = try? Data(contentsOf: jsonURL),
-                let sidecar = try? JSONDecoder().decode(PendingSegment.self, from: data)
-            else {
+            guard let sidecar = try? PendingSegment.load(cue: cueIndex, in: pendingDirURL) else {
                 Log.recording.warning(
                     "pending sidecar \(jsonURL.lastPathComponent) unreadable; segment skipped")
                 continue

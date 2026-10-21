@@ -427,9 +427,11 @@ public actor ImportPipeline {
         let committed = try outbox.committedCueIndices()
         try outbox.removeCommittedSegments(from: pendingDirURL)
         if hasTranscriptionFailures && !retryFailures { throw ImportPipelineError.transcriptionFailed }
+        let pendingFiles =
+            FileManager.default.fileExists(atPath: pendingDirURL.path)
+            ? try FileManager.default.contentsOfDirectory(at: pendingDirURL, includingPropertiesForKeys: nil) : []
         let pendingIndices =
-            ((try? FileManager.default.contentsOfDirectory(
-                at: pendingDirURL, includingPropertiesForKeys: nil)) ?? [])
+            pendingFiles
             .filter { $0.pathExtension == "json" }
             .compactMap { Int($0.deletingPathExtension().lastPathComponent) }
             .sorted()
@@ -438,10 +440,7 @@ public actor ImportPipeline {
             uploadsDone = 0
             for cueIndex in pendingIndices {
                 if committed.contains(cueIndex) { continue }
-                let jsonURL = pendingDirURL.appending(path: "\(cueIndex).json")
-                guard let data = try? Data(contentsOf: jsonURL),
-                    let sidecar = try? JSONDecoder().decode(PendingSegment.self, from: data)
-                else { continue }
+                let sidecar = try PendingSegment.load(cue: cueIndex, in: pendingDirURL)
                 try outbox.reserveCue(
                     index: sidecar.cueIndex, start: sidecar.startSec, end: sidecar.endSec,
                     speaker: SpeakerLabel.name(slot: sidecar.speaker),

@@ -192,6 +192,9 @@ public final class RecordingController {
     private var healthTask: Task<Void, Never>?
     private var preparationDeadline: Task<Void, Never>?
     private var startTask: Task<Void, Never>?
+    /// Quit may return before non-cancellable model preparation does. A later
+    /// Record must join that work before reusing the same model instances.
+    private var canceledPreparation: Task<Void, Never>?
     private var generation = 0
     private var captureStartedAt: TimeInterval?
     private var selectionWarning: RecordingProblem?
@@ -280,6 +283,7 @@ public final class RecordingController {
         healthTask?.cancel()
         preparationDeadline?.cancel()
         startTask?.cancel()
+        canceledPreparation?.cancel()
         ingestTask?.cancel()
         liveTask?.cancel()
         transcriptTask?.cancel()
@@ -356,6 +360,8 @@ public final class RecordingController {
     }
 
     private func start(generation: Int) async {
+        guard generation == self.generation, !Task.isCancelled else { return }
+        let priorPreparation = canceledPreparation
         audioProblem = nil
         selectionWarning = nil
         observedRecoveries = [:]
@@ -390,6 +396,9 @@ public final class RecordingController {
             await finish(failure: .startupFailed, waitForPreparation: true)
         }
         do {
+            await priorPreparation?.value
+            guard generation == self.generation, !Task.isCancelled else { return }
+            canceledPreparation = nil
             // Fixer (SPEC.md §5.2): reuses the note's saved thread if any.
             // A thread created under older instructions — a contract
             // version bump or a user edit to FIXER.md — is retired; a
@@ -607,11 +616,17 @@ public final class RecordingController {
         capture = nil
         if waitForPreparation {
             if forQuit {
+                let priorPreparation = canceledPreparation
+                canceledPreparation = Task {
+                    await priorPreparation?.value
+                    await pendingPreparation?.value
+                }
                 // Invalidates the actor's preparation token before a model or
                 // permission request returns, without waiting on that request.
                 try? await pipeline.abort(runFixer: false)
             } else {
                 await pendingPreparation?.value
+                canceledPreparation = nil
             }
         }
         // A failing model/write must not hold a hardware source open. Cancel

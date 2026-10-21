@@ -254,6 +254,34 @@ struct RecordingHealthTests {
         #expect(NoteRecordingState.current(noteFolder: folder).activeSession == nil)
     }
 
+    @Test("Record after a canceled Quit waits for earlier preparation", arguments: [false, true])
+    func preparationRetryWaitsAfterCanceledQuit(repeatQuit: Bool) async throws {
+        let folder = try folder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let source = HealthInput()
+        let diarizer = HeldHealthDiarizer()
+        let (recorder, _) = controller(folder: folder, source: source, notices: HealthNotices(), diarizer: diarizer)
+        recorder.startRecording()
+        try await waitUntil { diarizer.startCount == 1 }
+        #expect(await recorder.finishForQuit())
+        // Another document can cancel Quit; the app then remains available.
+        recorder.startRecording()
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(diarizer.startCount == 1)
+        #expect(source.startCount == 0)
+        if repeatQuit {
+            #expect(await recorder.finishForQuit())
+            recorder.startRecording()
+            try await Task.sleep(for: .milliseconds(30))
+            #expect(diarizer.startCount == 1)
+            #expect(source.startCount == 0)
+        }
+        diarizer.release()
+        try await waitUntil { recorder.status == .recording }
+        #expect(diarizer.startCount == 2)
+        await recorder.stopRecording()
+    }
+
     @Test("late preparation cannot start a ghost recording after its deadline")
     func preparationDeadlineAndLateCompletion() async throws {
         let folder = try folder()
@@ -578,6 +606,35 @@ private struct HealthTranscriber: Transcriber {
 }
 private final class HealthDiarizer: DiarizerStream, @unchecked Sendable {
     func prepare() async throws {}
+    func resetSession() {}
+    func addAudio(_ samples: [Float]) {}
+    func process() throws -> DiarizerChunkResult? { nil }
+    func finalizeSession() throws -> DiarizerChunkResult? { nil }
+}
+
+private final class HeldHealthDiarizer: DiarizerStream, @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+    private var waiting: CheckedContinuation<Void, Never>?
+    var startCount: Int { lock.withLock { calls } }
+    func prepare() async throws {
+        let first = lock.withLock {
+            calls += 1
+            return calls == 1
+        }
+        if first {
+            await withCheckedContinuation { continuation in
+                lock.withLock { waiting = continuation }
+            }
+        }
+    }
+    func release() {
+        let continuation = lock.withLock {
+            defer { waiting = nil }
+            return waiting
+        }
+        continuation?.resume()
+    }
     func resetSession() {}
     func addAudio(_ samples: [Float]) {}
     func process() throws -> DiarizerChunkResult? { nil }
