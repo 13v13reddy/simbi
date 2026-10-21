@@ -13,6 +13,20 @@ public protocol TranscriptFixerHost: AnyObject, Sendable {
     func fixerDidCompletePass() async -> Int
 }
 
+/// The fixer's server boundary, kept small so request failures and notification
+/// timing can be exercised without a live Codex process.
+protocol TranscriptFixerServing: Sendable {
+    func request(method: String, params: [String: any Sendable]) async throws -> Data
+    func addNotificationHandler(_ handler: @escaping @Sendable (String, Data) -> Void) async
+    func startFixerThread(cwd: URL, name: String) async throws -> String
+}
+
+extension AppServerClient: TranscriptFixerServing {
+    func startFixerThread(cwd: URL, name: String) async throws -> String {
+        try await CodexTurn.startThread(client: self, cwd: cwd, sandbox: "workspace-write", name: name)
+    }
+}
+
 /// Coarse fixer activity for the UI (the header button's status):
 /// one event per pass milestone, no payloads.
 public enum FixerEvent: Equatable, Sendable {
@@ -22,6 +36,10 @@ public enum FixerEvent: Equatable, Sendable {
     case passCompleted
     /// Recording stopped and every cue has been reviewed.
     case done
+    /// The request or turn failed; original transcript text remains intact.
+    case passFailed
+    /// Recording stopped with cues still awaiting a successful review.
+    case stoppedAfterFailure
 }
 
 /// The per-note transcript-fixer thread (SPEC.md §5.2): a Codex worker
@@ -54,7 +72,7 @@ public actor TranscriptFixer {
 
     private let noteFolderURL: URL
     private let project: SimbiCodexProject
-    private let client: AppServerClient
+    private let client: any TranscriptFixerServing
     /// Model override for fixer turns (SPEC.md §5.5); nil = thread default.
     private let model: String?
     /// Reasoning-effort override; nil = the model's own default.
@@ -68,10 +86,21 @@ public actor TranscriptFixer {
     /// project, so archive it once before creating its replacement.
     private var retiredThreadId: String?
 
-    private var turnActive = false
-    private var lastPingedCue = 0
+    /// Occupies the slot from snapshot preparation through the final merge.
+    /// Actor isolation alone does not protect those asynchronous host calls.
+    private struct Pass {
+        enum Phase { case preparing, starting, running, merging }
+        let throughCue: Int
+        var phase: Phase = .preparing
+        var turnId: String?
+        var earlyCompletions: [String: String] = [:]
+    }
+    private var pass: Pass?
+    private var lastReviewedCue = 0
     private var newestCue = 0
     private var stopping = false
+    private var failed = false
+    private var terminalNotified = false
     /// Weak: the pipeline owns the fixer; the back-reference must not keep
     /// either alive.
     private weak var host: (any TranscriptFixerHost)?
@@ -85,9 +114,22 @@ public actor TranscriptFixer {
         projectRootURL: URL = SimbiHome().rootURL,
         instructions: String = AgentInstructions.fixer.defaultContents
     ) {
+        self.init(
+            noteFolderURL: noteFolderURL, server: client, savedThreadId: savedThreadId,
+            retiredThreadId: retiredThreadId, model: model, effort: effort,
+            projectRootURL: projectRootURL, instructions: instructions)
+    }
+
+    init(
+        noteFolderURL: URL, server: any TranscriptFixerServing, savedThreadId: String?,
+        retiredThreadId: String? = nil,
+        model: String? = nil, effort: String? = nil,
+        projectRootURL: URL = SimbiHome().rootURL,
+        instructions: String = AgentInstructions.fixer.defaultContents
+    ) {
         self.noteFolderURL = noteFolderURL
         self.project = SimbiCodexProject(rootURL: projectRootURL)
-        self.client = client
+        self.client = server
         self.threadId = savedThreadId
         self.retiredThreadId = retiredThreadId
         self.model = model
@@ -117,6 +159,16 @@ public actor TranscriptFixer {
     /// resumes the note's existing thread (archive → unarchive → resume).
     public func recordingStarted() async throws {
         stopping = false
+        terminalNotified = false
+        do {
+            try await prepareThread()
+        } catch {
+            if !failed { failPass() }
+            throw error
+        }
+    }
+
+    private func prepareThread() async throws {
         // The task directory must exist before its first turn.
         do {
             try FileManager.default.createDirectory(
@@ -129,10 +181,14 @@ public actor TranscriptFixer {
             await client.addNotificationHandler { [weak self] method, paramsData in
                 let params =
                     (try? JSONSerialization.jsonObject(with: paramsData)) as? [String: Any]
-                let threadId = params?["threadId"] as? String
                 switch method {
                 case "turn/completed":
-                    Task { await self?.turnCompleted(threadId: threadId) }
+                    guard let threadId = params?["threadId"] as? String,
+                        let turn = params?["turn"] as? [String: Any],
+                        let turnId = turn["id"] as? String,
+                        let status = turn["status"] as? String
+                    else { return }
+                    Task { await self?.turnCompleted(threadId: threadId, turnId: turnId, status: status) }
                 default:
                     break
                 }
@@ -163,16 +219,15 @@ public actor TranscriptFixer {
             }
         }
 
-        threadId = try await CodexTurn.startThread(
-            client: client,
+        threadId = try await client.startFixerThread(
             cwd: project.rootURL,
-            sandbox: "workspace-write",
             name: project.threadName(for: noteFolderURL, role: "Transcript Fixer"))
-        try await startTurn(text: instructions)
+        try await startTurn(text: instructions, throughCue: 0)
     }
 
     /// Called when a cue lands in transcript.vtt.
     public func cueAppended(index: Int) async {
+        if index > newestCue { terminalNotified = false }
         newestCue = max(newestCue, index)
         await pingIfIdle()
     }
@@ -181,36 +236,44 @@ public actor TranscriptFixer {
     public func recordingStopped() async {
         stopping = true
         await pingIfIdle()
-        if !turnActive {
-            doneIfDrained()
-        }
+        finishIfStopped()
     }
 
-    private func turnCompleted(threadId: String?) async {
-        guard threadId == self.threadId else { return }
-        turnActive = false
+    private func turnCompleted(threadId: String, turnId: String, status: String) async {
+        guard threadId == self.threadId, let active = pass else { return }
+        if active.phase == .starting {
+            // A fast turn can complete before turn/start's response arrives.
+            // Wait for its id before touching the snapshot or advancing cues.
+            pass?.earlyCompletions[turnId] = status
+            return
+        }
+        guard active.phase == .running, active.turnId == turnId else { return }
+        guard status == "completed" else {
+            Log.codex.warning("fixer turn \(turnId) ended with status \(status); retaining cues for retry")
+            failPass()
+            return
+        }
+        pass?.phase = .merging
         // Merge this pass's edits into the live file BEFORE the next pass
         // snapshots it — the next working copy must include them.
         await host?.fixerDidCompletePass()
+        lastReviewedCue = max(lastReviewedCue, active.throughCue)
+        pass = nil
         eventSink?(.passCompleted)
-        if newestCue > lastPingedCue {
-            await pingIfIdle()  // coalesced pass over everything new
-        } else if stopping {
-            doneIfDrained()
-        }
+        await pingIfIdle()  // coalesced pass over everything new
+        finishIfStopped()
     }
 
     private func pingIfIdle() async {
-        guard !turnActive, threadId != nil, newestCue > lastPingedCue else { return }
-        let from = lastPingedCue + 1
+        guard pass == nil, threadId != nil, newestCue > lastReviewedCue else { return }
+        let from = lastReviewedCue + 1
         let to = newestCue
-        lastPingedCue = to
         let text =
             from == to
             ? "Cue \(to) is new — review and fix."
             : "Cues \(from)..\(to) are new — review and fix."
         do {
-            try await startTurn(text: text)
+            try await startTurn(text: text, throughCue: to)
         } catch {
             Log.codex.error(
                 "fixer ping for cues \(from)..\(to) failed; they stay unfixed until the"
@@ -218,17 +281,20 @@ public actor TranscriptFixer {
         }
     }
 
-    private func startTurn(text: String) async throws {
-        guard let threadId else { return }
+    private func startTurn(text: String, throughCue: Int) async throws {
+        guard pass == nil, let threadId else { return }
+        pass = Pass(throughCue: throughCue)
+        failed = false
+        terminalNotified = false
+        eventSink?(.passStarted)
         // Refresh the working copy from the live file before the model
         // looks at it.
         await host?.fixerWillStartPass()
-        turnActive = true
-        eventSink?(.passStarted)
+        pass?.phase = .starting
         do {
             // Workspace-write scoped to the fixer's worktree — the live
             // note folder (transcript.vtt included) is read-only to it.
-            _ = try await client.request(
+            let data = try await client.request(
                 method: "turn/start",
                 params: CodexTurn.startParams(
                     threadId: threadId,
@@ -238,14 +304,37 @@ public actor TranscriptFixer {
                         task: text),
                     writableRoot: Self.worktreeURL(noteFolder: noteFolderURL),
                     model: model, effort: effort))
+            let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            guard let turn = result?["turn"] as? [String: Any], let turnId = turn["id"] as? String
+            else { throw CodexWorkerError.malformedResponse }
+            let earlyStatus = pass?.earlyCompletions[turnId]
+            pass?.turnId = turnId
+            pass?.phase = .running
+            pass?.earlyCompletions.removeAll()
+            if let earlyStatus {
+                await turnCompleted(threadId: threadId, turnId: turnId, status: earlyStatus)
+            }
         } catch {
-            turnActive = false
+            failPass()
             throw error
         }
     }
 
-    private func doneIfDrained() {
-        guard stopping, threadId != nil, newestCue <= lastPingedCue else { return }
-        eventSink?(.done)
+    private func failPass() {
+        pass = nil
+        failed = true
+        eventSink?(.passFailed)
+        finishIfStopped()
+    }
+
+    private func finishIfStopped() {
+        guard stopping, pass == nil, !terminalNotified else { return }
+        if failed {
+            terminalNotified = true
+            eventSink?(.stoppedAfterFailure)
+        } else if threadId != nil, newestCue <= lastReviewedCue {
+            terminalNotified = true
+            eventSink?(.done)
+        }
     }
 }

@@ -125,7 +125,7 @@ public actor ImportPipeline {
         guard let fixer, lastImportedCue > 0 else { return }
         emit(fileName, .fixing)
         await fixer.setEventSink { [weak self] event in
-            guard event == .done else { return }
+            guard event == .done || event == .stoppedAfterFailure else { return }
             Task { await self?.fixerPassEnded() }
         }
         do {

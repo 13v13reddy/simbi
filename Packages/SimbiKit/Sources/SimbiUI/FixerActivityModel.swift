@@ -16,6 +16,8 @@ public final class FixerActivityModel {
         case working
         /// Recording stopped and every cue has been reviewed.
         case done
+        /// A pass failed; the original transcript is saved and no pass is running.
+        case failed
     }
 
     public private(set) var status: Status = .off
@@ -35,6 +37,7 @@ public final class FixerActivityModel {
         case .passStarted: status = .working
         case .passCompleted: status = .waiting
         case .done: status = .done
+        case .passFailed, .stoppedAfterFailure: status = .failed
         }
     }
 }

@@ -65,12 +65,12 @@ public final class TitleController {
     }
 
     /// Quiet means no in-flight job holds paths into the note folder:
-    /// the fixer has reviewed everything (or never ran) and no summary
-    /// generation is running.
+    /// the fixer has finished or is unavailable, and no summary generation
+    /// is running.
     nonisolated static func isQuiet(
         fixerStatus: FixerActivityModel.Status, summaryWorking: Bool
     ) -> Bool {
-        (fixerStatus == .off || fixerStatus == .done) && !summaryWorking
+        (fixerStatus == .off || fixerStatus == .done || fixerStatus == .failed) && !summaryWorking
     }
 
     /// A note the user (or a previous run) has renamed is never touched;

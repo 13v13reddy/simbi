@@ -45,4 +45,23 @@ import Testing
         model.noteRecordingStarted()
         #expect(model.status == .working)
     }
+
+    @Test func failedPassReleasesBusyStateUntilAnotherPassStarts() {
+        let model = FixerActivityModel()
+        model.handle(.passStarted)
+        model.handle(.passFailed)
+        #expect(model.status == .failed)
+        // RecordingController reports startup after pipeline.start returns;
+        // that notification must not hide a failed opening request.
+        model.noteRecordingStarted()
+        #expect(model.status == .failed)
+        model.handle(.stoppedAfterFailure)
+        #expect(model.status == .failed)
+        #expect(TitleController.isQuiet(fixerStatus: model.status, summaryWorking: false))
+        model.handle(.passStarted)
+        #expect(model.status == .working)
+        model.handle(.passCompleted)
+        model.handle(.done)
+        #expect(model.status == .done)
+    }
 }

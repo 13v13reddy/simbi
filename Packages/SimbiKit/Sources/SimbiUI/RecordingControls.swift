@@ -280,6 +280,7 @@ struct RecordingStatusStrip: View {
         case .waiting: "Transcript fixer: waiting for new cues"
         case .working: "Transcript fixer: reviewing"
         case .done: "Transcript fixer: done"
+        case .failed: "Transcript fixer unavailable. The original transcript is saved."
         }
     }
 

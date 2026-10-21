@@ -48,6 +48,8 @@ struct TitleControllerTests {
     func quietGate() {
         #expect(TitleController.isQuiet(fixerStatus: .off, summaryWorking: false))
         #expect(TitleController.isQuiet(fixerStatus: .done, summaryWorking: false))
+        #expect(TitleController.isQuiet(fixerStatus: .failed, summaryWorking: false))
+        #expect(!TitleController.isQuiet(fixerStatus: .failed, summaryWorking: true))
         #expect(!TitleController.isQuiet(fixerStatus: .waiting, summaryWorking: false))
         #expect(!TitleController.isQuiet(fixerStatus: .working, summaryWorking: false))
         #expect(!TitleController.isQuiet(fixerStatus: .done, summaryWorking: true))
