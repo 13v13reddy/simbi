@@ -12,6 +12,7 @@ public enum OpusWebMError: Error, Equatable {
     case fileAppendFailed
     case fileParseFailed
     case muxWriteFailed
+    case writerClosed
 }
 
 /// Shared constants of Simbi's single audio format (SPEC.md §3.1/§3.3):
@@ -56,7 +57,9 @@ public final class OpusWebMEncoder {
     }
 
     private let encoder: OpaquePointer
-    private let writer: OpaquePointer
+    private var writer: OpaquePointer?
+    private let closeWriter: (OpaquePointer) -> Int32
+    private var finishError: OpusWebMError?
     private var pending: [Float] = []
     private var framesWritten: UInt64 = 0
     private let baseMs: UInt64
@@ -68,7 +71,12 @@ public final class OpusWebMEncoder {
         baseMs + framesWritten * OpusWebMFormat.frameMilliseconds
     }
 
-    public init(fileURL: URL, mode: Mode) throws {
+    public convenience init(fileURL: URL, mode: Mode) throws {
+        try self.init(fileURL: fileURL, mode: mode, closeWriter: { swebm_writer_close($0) })
+    }
+
+    init(fileURL: URL, mode: Mode, closeWriter: @escaping (OpaquePointer) -> Int32) throws {
+        self.closeWriter = closeWriter
         var err: Int32 = 0
         guard
             let encoder = opus_encoder_create(
@@ -120,11 +128,13 @@ public final class OpusWebMEncoder {
     }
 
     deinit {
+        if let writer { _ = closeWriter(writer) }
         opus_encoder_destroy(encoder)
     }
 
     /// Appends 16 kHz mono samples; encodes every full 20 ms frame.
     public func append(samples: [Float]) throws {
+        guard writer != nil else { throw OpusWebMError.writerClosed }
         pending.append(contentsOf: samples)
         while pending.count >= OpusWebMFormat.frameSamples {
             let frame = Array(pending.prefix(OpusWebMFormat.frameSamples))
@@ -134,10 +144,12 @@ public final class OpusWebMEncoder {
     }
 
     /// Pads any trailing partial frame with silence, closes the cluster and
-    /// the file. The encoder is unusable afterwards. Returns the final
-    /// timeline position in milliseconds.
+    /// the file. Further writes are refused; repeated finishes return the
+    /// same position or close error without closing the native writer again.
     @discardableResult
     public func finish() throws -> UInt64 {
+        if let finishError { throw finishError }
+        guard let writer else { return positionMilliseconds }
         if !pending.isEmpty {
             var frame = pending
             frame.append(
@@ -146,17 +158,25 @@ public final class OpusWebMEncoder {
             try encode(frame: frame)
         }
         let end = positionMilliseconds
-        guard swebm_writer_close(writer) == 0 else { throw OpusWebMError.muxWriteFailed }
+        // Native close frees the pointer even on failure. Relinquish ownership
+        // before checking its result, so abort/deinit cannot use it again.
+        self.writer = nil
+        guard closeWriter(writer) == 0 else {
+            finishError = .muxWriteFailed
+            throw OpusWebMError.muxWriteFailed
+        }
         return end
     }
 
     /// Flushes muxed bytes to disk (call after each cluster for crash
     /// tolerance; the file is valid at every flush point).
     public func flush() throws {
+        guard let writer else { throw OpusWebMError.writerClosed }
         guard swebm_writer_flush(writer) == 0 else { throw OpusWebMError.muxWriteFailed }
     }
 
     private func encode(frame: [Float]) throws {
+        guard let writer else { throw OpusWebMError.writerClosed }
         let timecodeMs = positionMilliseconds
         let written = frame.withUnsafeBufferPointer { pcm in
             packetBuffer.withUnsafeMutableBufferPointer { out in

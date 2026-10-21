@@ -283,6 +283,11 @@ public actor RecordingPipeline: TranscriptFixerHost {
         vad.resetSession()
 
         if sessionNumber == 1 || !FileManager.default.fileExists(atPath: audioFileURL.path) {
+            if FileManager.default.fileExists(atPath: audioFileURL.path),
+                try OpusWebMDecoder(fileURL: audioFileURL).endMilliseconds > 0
+            {
+                throw RecordingPipelineError.audioFileMismatch
+            }
             encoder = try makeEncoder(audioFileURL, .create)
         } else {
             // Verify the file matches state.json bookkeeping (±1 cluster).

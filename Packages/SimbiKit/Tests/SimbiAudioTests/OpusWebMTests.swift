@@ -1,3 +1,4 @@
+import CLibWebM
 import Foundation
 import Testing
 
@@ -5,6 +6,61 @@ import Testing
 
 @Suite("OpusWebM")
 struct OpusWebMTests {
+    @Test("a failed native close cannot close the freed writer a second time")
+    func failedCloseIsNotRepeated() throws {
+        let url = makeTempFile()
+        defer { try? FileManager.default.removeItem(at: url) }
+        var closes = 0
+        let encoder = try OpusWebMEncoder(fileURL: url, mode: .create) { writer in
+            closes += 1
+            // Native close releases the pointer even when it reports failure.
+            // Avoid a process crash in the regression test if called twice.
+            if closes == 1 { _ = swebm_writer_close(writer) }
+            return -1
+        }
+        try encoder.append(samples: tone(seconds: 0.1))
+        #expect(throws: OpusWebMError.muxWriteFailed) { try encoder.finish() }
+        #expect(throws: OpusWebMError.muxWriteFailed) { try encoder.finish() }
+        #expect(closes == 1)
+    }
+
+    @Test("abandoned encoders release their native file writer")
+    func closesAbandonedWriter() throws {
+        let url = makeTempFile()
+        defer { try? FileManager.default.removeItem(at: url) }
+        var closes = 0
+        do {
+            let encoder = try OpusWebMEncoder(fileURL: url, mode: .create) { writer in
+                closes += 1
+                return swebm_writer_close(writer)
+            }
+            try encoder.append(samples: tone(seconds: 0.1))
+            try encoder.flush()
+        }
+        #expect(closes == 1)
+    }
+
+    @Test("finished encoders refuse further writes and close exactly once")
+    func finishedWriterIsClosedOnce() throws {
+        let url = makeTempFile()
+        defer { try? FileManager.default.removeItem(at: url) }
+        var closes = 0
+        do {
+            let encoder = try OpusWebMEncoder(fileURL: url, mode: .create) { writer in
+                closes += 1
+                return swebm_writer_close(writer)
+            }
+            try encoder.append(samples: tone(seconds: 0.1))
+            #expect(try encoder.finish() == 100)
+            let saved = try Data(contentsOf: url)
+            #expect(try encoder.finish() == 100)
+            #expect(throws: OpusWebMError.writerClosed) { try encoder.append(samples: [0.1]) }
+            #expect(throws: OpusWebMError.writerClosed) { try encoder.flush() }
+            #expect(try Data(contentsOf: url) == saved)
+        }
+        #expect(closes == 1)
+    }
+
     private func makeTempFile() -> URL {
         FileManager.default.temporaryDirectory
             .appending(path: "opuswebm-\(UUID().uuidString).webm")

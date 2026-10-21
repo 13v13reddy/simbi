@@ -6,8 +6,10 @@ import Testing
 
 @Suite("Transcript durability")
 struct TranscriptDurabilityTests {
-    @Test("unreadable recording metadata cannot overwrite saved audio", arguments: [false, true])
-    func preservesAudioWithCorruptState(importing: Bool) async throws {
+    @Test(
+        "unreadable or missing recording metadata cannot overwrite saved audio", arguments: [false, true],
+        [false, true])
+    func preservesAudioWithCorruptState(importing: Bool, missingState: Bool) async throws {
         let folder = FileManager.default.temporaryDirectory.appending(path: "transcript-corrupt-state-\(UUID())")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -19,7 +21,11 @@ struct TranscriptDurabilityTests {
         let savedAudio = try Data(contentsOf: audio)
         let stateURL = NoteRecordingState.fileURL(noteFolder: folder)
         let corruptState = Data("{incomplete state".utf8)
-        try corruptState.write(to: stateURL)
+        if missingState {
+            try FileManager.default.removeItem(at: stateURL)
+        } else {
+            try corruptState.write(to: stateURL)
+        }
         if importing {
             let pipeline = ImportPipeline(
                 noteFolderURL: folder, transcriber: FakeTranscriber(),
@@ -35,7 +41,7 @@ struct TranscriptDurabilityTests {
             if await pipeline.isRecording { try await pipeline.abort(runFixer: false) }
         }
         #expect(try Data(contentsOf: audio) == savedAudio)
-        #expect(try Data(contentsOf: stateURL) == corruptState)
+        if !missingState { #expect(try Data(contentsOf: stateURL) == corruptState) }
     }
 
     @Test("a failed cue journal write does not interrupt healthy audio capture")

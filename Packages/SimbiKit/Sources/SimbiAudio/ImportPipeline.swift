@@ -247,6 +247,11 @@ public actor ImportPipeline {
     ) async throws -> (pcm: [Float], entries: [ImportTimelineEntry]) {
         let encoder: OpusWebMEncoder
         if base == 0 || !FileManager.default.fileExists(atPath: audioFileURL.path) {
+            if FileManager.default.fileExists(atPath: audioFileURL.path),
+                try OpusWebMDecoder(fileURL: audioFileURL).endMilliseconds > 0
+            {
+                throw ImportPipelineError.audioFileMismatch
+            }
             encoder = try OpusWebMEncoder(fileURL: audioFileURL, mode: .create)
         } else {
             // Same bookkeeping check as RecordingPipeline.start().
