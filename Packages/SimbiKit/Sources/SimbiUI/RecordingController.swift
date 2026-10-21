@@ -203,7 +203,8 @@ public final class RecordingController {
     private var liveTask: Task<Void, Never>?
     private var transcriptTask: Task<Void, Never>?
     private var transcriptionTask: Task<Void, Never>?
-    private var pendingStopNotification = false
+    private var stopNotificationTask: Task<Void, Never>?
+    private var pendingStopNotification: Bool { stopNotificationTask != nil }
     private var watcher: FileTreeWatcher?
 
     public convenience init(noteFolderURL: URL) {
@@ -288,6 +289,7 @@ public final class RecordingController {
         liveTask?.cancel()
         transcriptTask?.cancel()
         transcriptionTask?.cancel()
+        stopNotificationTask?.cancel()
         capture?.stop()
     }
 
@@ -353,6 +355,8 @@ public final class RecordingController {
     public func startRecording() {
         guard canRetry, !ApplicationQuitCoordinator.shared.isQuitting else { return }
         observeTranscriptSaving()
+        stopNotificationTask?.cancel()
+        stopNotificationTask = nil
         generation += 1
         let generation = generation
         status = .preparing
@@ -692,12 +696,16 @@ public final class RecordingController {
     /// empty one is skipped quietly downstream). A recording restarted
     /// during the wait swallows the trigger: no trigger while recording.
     private func notifyStoppedAfterTranscriptDrain() {
-        pendingStopNotification = true
-        Task { [pipeline] in
-            defer { pendingStopNotification = false }
+        stopNotificationTask?.cancel()
+        let generation = generation
+        stopNotificationTask = Task { [pipeline, weak self] in
             _ = await TranscriptDrainWait.wait {
                 await pipeline.isTranscriptDrained
             }
+            // A superseded task must neither fire a stale trigger nor clear
+            // the newer Stop's protection while its transcript is pending.
+            guard let self, !Task.isCancelled, generation == self.generation else { return }
+            stopNotificationTask = nil
             guard status == .idle, !ApplicationQuitCoordinator.shared.isQuitting else { return }
             onRecordingStopped?()
         }

@@ -32,6 +32,7 @@ struct RecordingHealthTests {
         folder: URL, source: HealthInput, notices: HealthNotices, system: HealthInput? = nil,
         diarizer: any DiarizerStream = HealthDiarizer(), healthPolicy: RecordingHealthPolicy? = nil,
         microphonePermission: Bool = true,
+        outbox: TranscriptOutbox? = nil,
         makeWriter: @escaping @Sendable (URL, OpusWebMEncoder.Mode) throws -> any RecordingAudioWriting = {
             try OpusWebMEncoder(fileURL: $0, mode: $1)
         }
@@ -39,7 +40,7 @@ struct RecordingHealthTests {
         let policy = healthPolicy ?? self.policy
         let pipeline = RecordingPipeline(
             noteFolderURL: folder, transcriber: HealthTranscriber(),
-            diarizer: diarizer, vad: HealthVad(), makeEncoder: makeWriter)
+            diarizer: diarizer, vad: HealthVad(), makeEncoder: makeWriter, outbox: outbox)
         let controller = RecordingController(
             noteFolderURL: folder, pipeline: pipeline,
             makeCapture: { [policy] in
@@ -191,6 +192,34 @@ struct RecordingHealthTests {
         #expect(source.startCount == 0)
         #expect(recorder.status == .idle)
         #expect(await pipeline.isTranscriptDrained)
+    }
+
+    @Test("Stop, Resume, Stop triggers AI notes once after the final transcript drains")
+    func resumedRecordingReplacesPendingStop() async throws {
+        let folder = try folder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let outbox = TranscriptOutbox(fileURL: VTT.fileURL(noteFolder: folder), noteName: "Test")
+        let (recorder, pipeline) = controller(
+            folder: folder, source: HealthInput(), notices: HealthNotices(), outbox: outbox)
+        var triggers = 0
+        recorder.onRecordingStopped = { triggers += 1 }
+        recorder.startRecording()
+        try await waitUntil { recorder.status == .recording }
+        // Hold the first session's final transcription across Resume.
+        try outbox.reserveCue(index: 1, start: 0, end: 1, speaker: "Speaker 1", continuation: false)
+        await recorder.stopRecording()
+        #expect(await !pipeline.isTranscriptDrained)
+        recorder.startRecording()
+        try await waitUntil { recorder.status == .recording }
+        await recorder.stopRecording()
+        #expect(triggers == 0)
+        try outbox.fulfillCue(index: 1, text: "Final utterance")
+        try await waitUntil { triggers > 0 }
+        // Give both old and new polling tasks time to observe the drain.
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(triggers == 1)
+        #expect(recorder.status == .idle)
+        #expect(NoteRecordingState.current(noteFolder: folder).sessionCount == 2)
     }
 
     @Test("Quit finalizes an active recording without firing post-recording AI jobs")

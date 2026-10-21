@@ -110,8 +110,13 @@ public final class ImportController {
                 }
                 progressTask.cancel()
                 await progressTask.value
+                self.decodingAudio = false
+                self.fixingTranscript = false
                 self.status = failure.map { .failed(message: $0) } ?? .idle
                 self.current = nil
+                if failure == nil, !ApplicationQuitCoordinator.shared.isQuitting {
+                    self.onImportFinished?()
+                }
                 self.pump()
             }
         }
