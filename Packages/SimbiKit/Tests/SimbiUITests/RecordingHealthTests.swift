@@ -33,6 +33,7 @@ struct RecordingHealthTests {
         diarizer: any DiarizerStream = HealthDiarizer(), healthPolicy: RecordingHealthPolicy? = nil,
         microphonePermission: Bool = true,
         outbox: TranscriptOutbox? = nil,
+        relabelSpeakers: (@Sendable (URL) async -> Void)? = nil,
         makeWriter: @escaping @Sendable (URL, OpusWebMEncoder.Mode) throws -> any RecordingAudioWriting = {
             try OpusWebMEncoder(fileURL: $0, mode: $1)
         }
@@ -48,7 +49,7 @@ struct RecordingHealthTests {
                     makeMicrophoneCapture: { source }, makeSystemCapture: { system ?? source }, policy: policy)
             },
             requestMicrophoneAccess: { microphonePermission }, healthPolicy: policy, notifier: notices,
-            activity: activity)
+            activity: activity, relabelSpeakers: relabelSpeakers)
         controller.systemAudioEnabled = system != nil
         controller.micEnabled = true
         return (controller, pipeline)
@@ -220,6 +221,27 @@ struct RecordingHealthTests {
         #expect(triggers == 1)
         #expect(recorder.status == .idle)
         #expect(NoteRecordingState.current(noteFolder: folder).sessionCount == 2)
+    }
+
+    @Test("speakers are relabeled once after the transcript drains and before AI notes")
+    func relabelRunsBeforeAINotes() async throws {
+        let folder = try folder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let events = RelabelEvents()
+        let (recorder, _) = controller(
+            folder: folder, source: HealthInput(), notices: HealthNotices(), system: HealthInput(),
+            relabelSpeakers: { url in await events.record("relabel \(url.lastPathComponent)") })
+        recorder.onRecordingStopped = { Task { await events.record("ai notes") } }
+        recorder.startRecording()
+        try await waitUntil { recorder.status == .recording }
+        try await Task.sleep(for: .milliseconds(200))
+        await recorder.stopRecording()
+        let deadline = Date().addingTimeInterval(3)
+        while await events.log.count < 2, Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(await events.log == ["relabel \(folder.lastPathComponent)", "ai notes"])
+        // Both sources were captured, so their levels were saved per frame.
+        let levels = try Data(contentsOf: NoteLayout.sourceLevelsURL(noteFolder: folder))
+        #expect(levels.count >= 8 * 2)
     }
 
     @Test("Quit finalizes an active recording without firing post-recording AI jobs")
@@ -692,4 +714,9 @@ private final class HealthVad: VadStream, @unchecked Sendable {
     func prepare() async throws {}
     func resetSession() {}
     func addAudio(_ samples: [Float]) async throws -> [Bool] { [] }
+}
+
+private actor RelabelEvents {
+    private(set) var log: [String] = []
+    func record(_ event: String) { log.append(event) }
 }

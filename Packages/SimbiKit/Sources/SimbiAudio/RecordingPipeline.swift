@@ -33,6 +33,8 @@ public actor RecordingPipeline: TranscriptFixerHost {
 
     private var state: NoteRecordingState
     private var encoder: (any RecordingAudioWriting)?
+    /// Per-source loudness beside audio.webm, for speaker labelling.
+    private var sourceLevels: SourceLevelsWriter?
     private let makeEncoder: @Sendable (URL, OpusWebMEncoder.Mode) throws -> any RecordingAudioWriting
     private var ring = SampleRingBuffer()
     private var engine = CutEngine()
@@ -304,6 +306,8 @@ public actor RecordingPipeline: TranscriptFixerHost {
 
         finalizationPending = true
         writeProgress.opened(bytes: try audioFileBytes())
+        sourceLevels = SourceLevelsWriter(
+            url: NoteLayout.sourceLevelsURL(noteFolder: noteFolderURL), startSample: sessionBaseSamples)
         try FileManager.default.createDirectory(
             at: pendingDirURL, withIntermediateDirectories: true)
 
@@ -349,11 +353,15 @@ public actor RecordingPipeline: TranscriptFixerHost {
     }
 
     /// Delivers one mixed 16 kHz mono batch to the four sinks in order,
-    /// then advances the release loop.
-    public func ingest(samples: [Float], capturedSampleCount: Int? = nil) async throws {
+    /// then advances the release loop. `sources` are the unmixed inputs,
+    /// recorded only as per-frame loudness.
+    public func ingest(
+        samples: [Float], capturedSampleCount: Int? = nil, sources: SourceSamples? = nil
+    ) async throws {
         guard recording else { return }
         ring.append(samples)
         try encoder?.append(samples: samples)
+        sourceLevels?.append(count: samples.count, sources: sources)
         // Flush the muxer per batch: a crash then loses < 20 ms of tail
         // audio (§11 promises 1–2 s; stdio flush per ~10 ms batch is cheap).
         try encoder?.flush()
@@ -509,6 +517,8 @@ public actor RecordingPipeline: TranscriptFixerHost {
         var failure: (any Error)?
         do { try encoder?.finish() } catch { failure = error }
         encoder = nil
+        sourceLevels?.finish()
+        sourceLevels = nil
         if let probe = try? OpusWebMDecoder(fileURL: audioFileURL) {
             // A write can fail partway through a batch. Resume after the
             // bytes that actually survived, rather than overlapping that tail.
@@ -574,6 +584,8 @@ public actor RecordingPipeline: TranscriptFixerHost {
 
         try encoder?.finish()
         encoder = nil
+        sourceLevels?.finish()
+        sourceLevels = nil
 
         state.totalSamples = sessionBaseSamples + realSamples
         state.sessionCount = sessionNumber

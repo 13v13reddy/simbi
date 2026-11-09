@@ -189,6 +189,8 @@ public final class RecordingController {
     private let activity: RecordingActivity
     private let enableFixer: Bool
     private let persistSourcePreferences: Bool
+    /// Whole-recording speaker pass run after Stop, before AI notes.
+    private let relabelSpeakers: (@Sendable (URL) async -> Void)?
     private var healthTask: Task<Void, Never>?
     private var preparationDeadline: Task<Void, Never>?
     private var startTask: Task<Void, Never>?
@@ -215,7 +217,17 @@ public final class RecordingController {
                 outbox: .shared(noteFolderURL: noteFolderURL)),
             makeCapture: { MixedCapture() },
             requestMicrophoneAccess: { await AVCaptureDevice.requestAccess(for: .audio) },
-            notifier: RecordingNotifications.shared, enableFixer: true, persistSourcePreferences: true)
+            notifier: RecordingNotifications.shared, enableFixer: true, persistSourcePreferences: true,
+            relabelSpeakers: { noteFolderURL in
+                do {
+                    let changed = try await SpeakerRelabeler().relabel(
+                        noteFolderURL: noteFolderURL, outbox: .shared(noteFolderURL: noteFolderURL))
+                    Log.recording.info("speaker relabel updated \(changed) cues")
+                } catch {
+                    // The live labels stay; nothing about the recording is lost.
+                    Log.recording.warning("speaker relabel skipped: \(error)")
+                }
+            })
     }
 
     init(
@@ -224,7 +236,7 @@ public final class RecordingController {
         requestMicrophoneAccess: @escaping @MainActor @Sendable () async -> Bool,
         healthPolicy: RecordingHealthPolicy = RecordingHealthPolicy(),
         notifier: any RecordingNotifying, activity: RecordingActivity = .shared, enableFixer: Bool = false,
-        persistSourcePreferences: Bool = false
+        persistSourcePreferences: Bool = false, relabelSpeakers: (@Sendable (URL) async -> Void)? = nil
     ) {
         self.noteFolderURL = noteFolderURL
         self.pipeline = pipeline
@@ -235,6 +247,7 @@ public final class RecordingController {
         self.activity = activity
         self.enableFixer = enableFixer
         self.persistSourcePreferences = persistSourcePreferences
+        self.relabelSpeakers = relabelSpeakers
         let storedProblem = StoredRecordingProblem.load(noteFolder: noteFolderURL)
         self.problem = storedProblem
         self.audioProblem = storedProblem?.isTranscriptProblem == true ? nil : storedProblem
@@ -482,7 +495,8 @@ public final class RecordingController {
                     guard !Task.isCancelled else { return }
                     do {
                         try await pipeline.ingest(
-                            samples: batch.samples, capturedSampleCount: batch.capturedSampleCount)
+                            samples: batch.samples, capturedSampleCount: batch.capturedSampleCount,
+                            sources: batch.sources)
                     } catch {
                         RecordingDiagnostics.error("recording ingest failed: \(error)")
                         capture.stop()
@@ -695,12 +709,16 @@ public final class RecordingController {
     /// expires the trigger fires with whatever transcript exists (an
     /// empty one is skipped quietly downstream). A recording restarted
     /// during the wait swallows the trigger: no trigger while recording.
+    /// Speaker labels are refined first so AI notes and titles see them.
     private func notifyStoppedAfterTranscriptDrain() {
         stopNotificationTask?.cancel()
         let generation = generation
-        stopNotificationTask = Task { [pipeline, weak self] in
+        stopNotificationTask = Task { [pipeline, relabelSpeakers, noteFolderURL, weak self] in
             _ = await TranscriptDrainWait.wait {
                 await pipeline.isTranscriptDrained
+            }
+            if let relabelSpeakers, !Task.isCancelled, generation == self?.generation {
+                await relabelSpeakers(noteFolderURL)
             }
             // A superseded task must neither fire a stale trigger nor clear
             // the newer Stop's protection while its transcript is pending.

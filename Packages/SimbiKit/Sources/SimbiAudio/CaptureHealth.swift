@@ -58,6 +58,9 @@ public struct CapturedAudioBatch: Sendable {
     public let samples: [Float]
     public let microphoneSamples: Int
     public let systemAudioSamples: Int
+    /// Each source as mixed into `samples` (zeros where it was missing),
+    /// kept so speaker labelling can tell the local voice from the call.
+    public var sources: SourceSamples? = nil
 
     public var capturedSampleCount: Int { max(microphoneSamples, systemAudioSamples) }
 }

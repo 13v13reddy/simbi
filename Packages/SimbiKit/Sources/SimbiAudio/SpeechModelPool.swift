@@ -87,6 +87,10 @@ public final class SpeechModelPool: @unchecked Sendable {
                 _ = try await sortformer.value
                 _ = try await vad.value
                 SpeechModelPool.warmupState.finish()
+                // The post-recording speaker pass uses the offline model.
+                // Load it quietly after the live models, so the first Stop
+                // does not wait on a download; failures retry on first use.
+                Task.detached(priority: .utility) { _ = try? await self.offlineDiarizer() }
             } catch {
                 // Clear the failed loads so a retry restarts them (both
                 // tasks have already completed by the time we get here).
@@ -121,11 +125,11 @@ public final class SpeechModelPool: @unchecked Sendable {
         }
     }
 
-    /// Offline Sortformer for file import (fused whole-window graph, its
-    /// own HuggingFace bundle). Loaded lazily on first import — never part
-    /// of app-launch warm-up. The instance serializes internally, so one
-    /// shared diarizer serves every import. A failed load is dropped so
-    /// the next call retries.
+    /// Offline Sortformer for file import and the post-recording speaker
+    /// pass (fused whole-window graph, its own HuggingFace bundle). Loaded
+    /// in the background after warm-up, never gating it. The instance
+    /// serializes internally, so one shared diarizer serves every caller.
+    /// A failed load is dropped so the next call retries.
     func offlineDiarizer() async throws -> OfflineSortformerDiarizer {
         let load: Task<OfflineDiarizerCheckout, Error> = lock.withLock {
             if let load = offlineDiarizerLoad { return load }

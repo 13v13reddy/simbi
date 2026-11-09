@@ -5,7 +5,13 @@ import Testing
 
 @Suite("Fixer merge (snapshot-and-replay)")
 struct FixerMergeTests {
-    private func vtt(_ cues: [TranscriptOutbox.CueEdit]) -> String {
+    private struct Cue {
+        let index: Int
+        let speaker: String
+        let text: String
+    }
+
+    private func vtt(_ cues: [Cue]) -> String {
         var out = VTT.header(noteName: "test")
         for cue in cues {
             out += VTT.render(
@@ -27,7 +33,7 @@ struct FixerMergeTests {
             .init(index: 2, speaker: "Speaker 2", text: "fine text"),
         ])
         let edits = TranscriptOutbox.fixerEdits(before: before, after: after)
-        #expect(edits == [.init(index: 1, speaker: "Speaker 1", text: "hello world")])
+        #expect(edits == [.init(index: 1, speaker: nil, text: "hello world")])
     }
 
     @Test("deletions, additions, and identical copies contribute nothing")
@@ -51,7 +57,7 @@ struct FixerMergeTests {
         let after = vtt([.init(index: 1, speaker: "Linus", text: "hi")])
         #expect(
             TranscriptOutbox.fixerEdits(before: before, after: after)
-                == [.init(index: 1, speaker: "Linus", text: "hi")])
+                == [.init(index: 1, speaker: "Linus", text: nil)])
     }
 
     @Test("an unparseable copy yields no edits")
@@ -73,8 +79,8 @@ struct FixerMergeTests {
         // rewrite would lose them; the surgical rewrite must not).
         let original =
             vtt([
-                .init(index: 1, speaker: "Speaker 1", text: "helo wrld"),
-                .init(index: 2, speaker: "Speaker 2", text: "keep me"),
+                Cue(index: 1, speaker: "Speaker 1", text: "helo wrld"),
+                Cue(index: 2, speaker: "Speaker 2", text: "keep me"),
             ])
             + "\nNOTE custom marker\n"
             + VTT.render(.sessionEnd(n: 1, wallClock: .init(timeIntervalSince1970: 0), offset: 3))
@@ -102,7 +108,7 @@ struct FixerMergeTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let fileURL = dir.appending(path: "transcript.vtt")
-        try vtt([.init(index: 1, speaker: "Speaker 1", text: "x")])
+        try vtt([Cue(index: 1, speaker: "Speaker 1", text: "x")])
             .write(to: fileURL, atomically: true, encoding: .utf8)
 
         let outbox = TranscriptOutbox(fileURL: fileURL, noteName: "test")
@@ -117,5 +123,25 @@ struct FixerMergeTests {
         }
         #expect(speaker == "BadName")
         #expect(text == "line one line → two")
+    }
+
+    @Test("a text-only fixer edit keeps a speaker relabel that landed during its pass")
+    func textEditKeepsLiveSpeaker() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appending(path: "fixer-merge-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appending(path: "transcript.vtt")
+        let snapshot = vtt([Cue(index: 1, speaker: "Speaker 2", text: "helo")])
+        try snapshot.write(to: fileURL, atomically: true, encoding: .utf8)
+        let outbox = TranscriptOutbox(fileURL: fileURL, noteName: "test")
+
+        // The relabel lands while the fixer is still working on its copy.
+        try outbox.applyEdits([.init(index: 1, speaker: "You", text: nil)])
+        let fixed = vtt([Cue(index: 1, speaker: "Speaker 2", text: "hello")])
+        try outbox.applyEdits(TranscriptOutbox.fixerEdits(before: snapshot, after: fixed))
+
+        let updated = try String(contentsOf: fileURL, encoding: .utf8)
+        #expect(updated.contains("<v You>hello"))
     }
 }

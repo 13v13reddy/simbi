@@ -45,6 +45,14 @@ public enum NoteLayout {
         stateDirURL(noteFolder: noteFolder).appending(path: "failed", directoryHint: .isDirectory)
     }
 
+    /// Microphone and system-audio loudness per 80 ms note-timeline frame
+    /// (two little-endian Float32 RMS values each). Lets speaker labelling
+    /// tell the local voice from the call after both are mixed into
+    /// audio.webm. Frames never written read as zeros, meaning "unknown".
+    public static func sourceLevelsURL(noteFolder: URL) -> URL {
+        stateDirURL(noteFolder: noteFolder).appending(path: "source-levels.f32")
+    }
+
     /// The fixer thread's writable copy of the transcript (snapshot-and-replay).
     public static func fixerWorktreeURL(noteFolder: URL) -> URL {
         stateDirURL(noteFolder: noteFolder)

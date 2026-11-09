@@ -197,15 +197,17 @@ public final class TranscriptOutbox: @unchecked Sendable {
         } catch { return false }
     }
 
-    /// One fixer edit to merge into the live file: a new payload (speaker +
-    /// text) for an existing cue. Timestamps and numbering are never
+    /// One edit to merge into the live file: a new speaker and/or text for
+    /// an existing cue. A nil field keeps whatever the live file says, so a
+    /// fixer pass that only corrected text cannot undo a speaker relabel
+    /// that landed while it ran. Timestamps and numbering are never
     /// editable — they stay whatever the live file says.
     public struct CueEdit: Equatable, Sendable {
         public let index: Int
-        public let speaker: String
-        public let text: String
+        public let speaker: String?
+        public let text: String?
 
-        public init(index: Int, speaker: String, text: String) {
+        public init(index: Int, speaker: String?, text: String?) {
             self.index = index
             self.speaker = speaker
             self.text = text
@@ -223,8 +225,12 @@ public final class TranscriptOutbox: @unchecked Sendable {
         defer { lock.unlock() }
         guard !edits.isEmpty, FileManager.default.fileExists(atPath: fileURL.path) else { return }
         let byIndex = Dictionary(edits.map { ($0.index, $0) }) { _, last in last }
-        let lines = try String(contentsOf: fileURL, encoding: .utf8)
-            .components(separatedBy: "\n")
+        let content = try String(contentsOf: fileURL, encoding: .utf8)
+        var live: [Int: (speaker: String, text: String)] = [:]
+        for case .cue(let index, _, _, let speaker, let text, _) in try VTTParser.parse(content).entries {
+            live[index] = (speaker, text)
+        }
+        let lines = content.components(separatedBy: "\n")
 
         var out: [String] = []
         var i = 0
@@ -232,14 +238,15 @@ public final class TranscriptOutbox: @unchecked Sendable {
         while i < lines.count {
             // A cue block: bare integer line, then a timing line.
             if let cueIndex = Int(lines[i]), i + 1 < lines.count,
-                lines[i + 1].contains(" --> "), let edit = byIndex[cueIndex]
+                lines[i + 1].contains(" --> "), let edit = byIndex[cueIndex],
+                let current = live[cueIndex]
             {
                 out.append(lines[i])
                 out.append(lines[i + 1])
                 out.append(
                     VTT.voicePayload(
-                        speaker: Self.sanitizeSpeaker(edit.speaker),
-                        text: Self.sanitizeText(edit.text)))
+                        speaker: Self.sanitizeSpeaker(edit.speaker ?? current.speaker),
+                        text: Self.sanitizeText(edit.text ?? current.text)))
                 i += 2
                 while i < lines.count, !lines[i].isEmpty { i += 1 }
                 changed = true
@@ -309,7 +316,10 @@ public final class TranscriptOutbox: @unchecked Sendable {
         var edits: [CueEdit] = []
         for case .cue(let index, _, _, let speaker, let text, _) in afterDocument.entries {
             if let old = beforeCues[index], old.speaker != speaker || old.text != text {
-                edits.append(CueEdit(index: index, speaker: speaker, text: text))
+                edits.append(
+                    CueEdit(
+                        index: index, speaker: old.speaker != speaker ? speaker : nil,
+                        text: old.text != text ? text : nil))
             }
         }
         return edits

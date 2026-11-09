@@ -55,10 +55,14 @@ public struct AudioMixer: Sendable {
         let microphoneCount = min(frameCount, microphone.count - microphoneStart)
         let systemCount = min(frameCount, backlog)
         var output = [Float](repeating: 0, count: frameCount)
+        var micOutput = [Float](repeating: 0, count: frameCount)
+        var systemOutput = [Float](repeating: 0, count: frameCount)
         for index in 0..<frameCount {
-            let mic = index < microphoneCount ? microphone[microphoneStart + index] : 0
-            let system = index < systemCount ? fifo[fifoStart + index] : 0
-            output[index] = Self.softClip(micGain * mic + systemGain * system)
+            let mic = index < microphoneCount ? micGain * microphone[microphoneStart + index] : 0
+            let system = index < systemCount ? systemGain * fifo[fifoStart + index] : 0
+            micOutput[index] = mic
+            systemOutput[index] = system
+            output[index] = Self.softClip(mic + system)
         }
         microphoneStart += microphoneCount
         fifoStart += systemCount
@@ -71,7 +75,8 @@ public struct AudioMixer: Sendable {
             fifoStart = 0
         }
         return CapturedAudioBatch(
-            samples: output, microphoneSamples: microphoneCount, systemAudioSamples: systemCount)
+            samples: output, microphoneSamples: microphoneCount, systemAudioSamples: systemCount,
+            sources: SourceSamples(microphone: micOutput, system: systemOutput))
     }
 
     public mutating func mix(mic: [Float]) -> [Float] {
