@@ -4,7 +4,7 @@ import Testing
 
 @testable import SimbiAudio
 
-/// Decoder tests synthesize fixtures at test time (say/afconvert, file-only,
+/// Decoder tests synthesize fixtures at test time (PCM/afconvert, file-only,
 /// silent — never played) and decode them back.
 @Suite("MediaFileDecoder")
 struct MediaFileDecoderTests {
@@ -17,15 +17,26 @@ struct MediaFileDecoderTests {
         try #require(p.terminationStatus == 0)
     }
 
-    /// say → aiff, then afconvert into the requested container.
+    /// A deterministic two-second tone, then afconvert into the requested container.
     private func fixture(format: [String], ext: String) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appending(path: "decoder-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let aiff = dir.appending(path: "src.aiff")
+        let source = dir.appending(path: "src.caf")
         let out = dir.appending(path: "src.\(ext)")
-        try run("/usr/bin/say", ["-o", aiff.path, "Testing one two three four five"])
-        try run("/usr/bin/afconvert", format + [aiff.path, out.path])
+        // CI runners need not have a working speech-synthesis voice.
+        let pcm = try #require(AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: pcm, frameCapacity: 88200))
+        buffer.frameLength = buffer.frameCapacity
+        let channel = try #require(buffer.floatChannelData?[0])
+        for i in 0..<Int(buffer.frameLength) {
+            channel[i] = 0.4 * sinf(2 * .pi * 440 * Float(i) / 44100)
+        }
+        do {
+            let file = try AVAudioFile(forWriting: source, settings: pcm.settings)
+            try file.write(from: buffer)
+        }
+        try run("/usr/bin/afconvert", format + [source.path, out.path])
         return out
     }
 
@@ -40,8 +51,10 @@ struct MediaFileDecoderTests {
     @Test("decodes a wav to 16 kHz mono at the right length")
     func decodesWav() async throws {
         let url = try fixture(format: ["-f", "WAVE", "-d", "LEI16@44100", "-c", "2"], ext: "wav")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let asset = AVURLAsset(url: url)
         let seconds = CMTimeGetSeconds(try await asset.load(.duration))
+        #expect(abs(seconds - 2) < 0.01)
         let samples = try await decodeAll(url)
         let expected = Int(seconds * 16000)
         #expect(abs(samples.count - expected) < 16000 / 5)  // within 200 ms
@@ -51,8 +64,9 @@ struct MediaFileDecoderTests {
     @Test("decodes an m4a (mp4 container) — the video-container code path")
     func decodesM4a() async throws {
         let url = try fixture(format: ["-f", "m4af", "-d", "aac"], ext: "m4a")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let samples = try await decodeAll(url)
-        #expect(samples.count > 16000)  // the sentence is well over a second
+        #expect(abs(samples.count - 32000) < 16000 / 5)  // within 200 ms
         #expect(samples.contains { abs($0) > 0.01 })
     }
 
