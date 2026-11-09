@@ -522,9 +522,18 @@ public final class RecordingController {
             hasRecording = true
         }
         elapsed = max(elapsed, saved.elapsed)
-        if status == .preparing, now - started >= healthPolicy.startupTimeout {
-            await finish(failure: sources.contains(where: { $0.receivedSamples > 0 }) ? .writeStalled : .noAudio)
-            return
+        // A source still working through its bounded recovery (for example
+        // the microphone switching to its fallback backend) gets its full
+        // retry window before the recording is declared silent.
+        let recovering = sources.contains { $0.state == .recovering || $0.recoveryAttempts > 0 }
+        let allUnavailable = !sources.isEmpty && sources.allSatisfy { $0.state == .unavailable }
+        if status == .preparing {
+            let deadline =
+                healthPolicy.startupTimeout + (recovering && !allUnavailable ? healthPolicy.sourceRecoveryTimeout : 0)
+            if now - started >= deadline || (allUnavailable && now - started >= healthPolicy.startupTimeout) {
+                await finish(failure: sources.contains(where: { $0.receivedSamples > 0 }) ? .writeStalled : .noAudio)
+                return
+            }
         }
         if status == .recording {
             let unsavedSeconds =
@@ -537,7 +546,13 @@ public final class RecordingController {
                 return
             }
             let lastInput = sources.compactMap(\.lastSampleTime).max() ?? started
-            if now - lastInput >= healthPolicy.sourceTimeout {
+            let silence = now - lastInput
+            // The source watchdog flips to recovering on its own clock; allow
+            // two health checks for that before treating the silence as final.
+            if silence >= healthPolicy.sourceTimeout,
+                allUnavailable || silence >= healthPolicy.sourceRecoveryTimeout
+                    || (!recovering && silence >= healthPolicy.sourceTimeout + 2 * healthPolicy.checkInterval)
+            {
                 await finish(failure: .noAudio)
                 return
             }

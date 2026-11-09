@@ -24,6 +24,14 @@ public struct RecordingHealthPolicy: Sendable {
         self.checkInterval = checkInterval
         self.preparationTimeout = preparationTimeout
     }
+
+    /// How long capture may go without any input while a source is still
+    /// recovering: each bounded attempt waits `sourceTimeout` for buffers.
+    /// Without this grace, a recording whose only source stalls would stop
+    /// at the moment its recovery begins.
+    public var sourceRecoveryTimeout: TimeInterval {
+        sourceTimeout * Double(maxRecoveryAttempts + 1) + retryDelay * Double(maxRecoveryAttempts)
+    }
 }
 
 public enum RecordingSource: String, Codable, Sendable, CaseIterable {

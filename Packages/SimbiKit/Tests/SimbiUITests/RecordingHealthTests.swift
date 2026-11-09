@@ -520,6 +520,26 @@ struct RecordingHealthTests {
         #expect(NoteRecordingState.current(noteFolder: folder).activeSession == nil)
     }
 
+    @Test("a microphone-only recording survives a stall that its recovery repairs")
+    func microphoneOnlyStallRecovers() async throws {
+        let folder = try folder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let input = HealthInput()
+        input.resumeOnRestart = true
+        // Longer than the stall that starts recovery: the health check must
+        // wait for the recovery instead of stopping the recording.
+        input.restartDelay = 0.3
+        let (recorder, _) = controller(folder: folder, source: input, notices: HealthNotices())
+        recorder.startRecording()
+        try await waitUntil { recorder.status == .recording }
+        input.paused = true
+        try await waitUntil { recorder.problem == .sourceRecovered(.microphone) }
+        #expect(recorder.status == .recording)
+        #expect(input.startCount == 2)
+        await recorder.stopRecording()
+        #expect(recorder.status == .idle)
+    }
+
     @Test("writer failure is reported without leaving a live session behind")
     func detectsWriteFailureAndRetries() async throws {
         let folder = try folder()
@@ -577,6 +597,13 @@ private final class HealthInput: MicrophoneCapturing, SystemCapturing, @unchecke
     private var pause = false
     private var starts = 0
     private var resume = false
+    private var delay: TimeInterval = 0
+    /// How long a restarted input takes before buffers flow again (a real
+    /// backend switch is not instant).
+    var restartDelay: TimeInterval {
+        get { lock.withLock { delay } }
+        set { lock.withLock { delay = newValue } }
+    }
     var resumeOnRestart: Bool {
         get { lock.withLock { resume } }
         set { lock.withLock { resume = newValue } }
@@ -590,7 +617,15 @@ private final class HealthInput: MicrophoneCapturing, SystemCapturing, @unchecke
     func start() throws -> AsyncStream<[Float]> {
         lock.withLock {
             starts += 1
-            if resume && starts > 1 { pause = false }
+            if resume && starts > 1 {
+                if delay > 0 {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
+                        self?.paused = false
+                    }
+                } else {
+                    pause = false
+                }
+            }
             let (stream, continuation) = AsyncStream.makeStream(of: [Float].self)
             self.continuation = continuation
             let timer = DispatchSource.makeTimerSource()
