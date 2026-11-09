@@ -66,6 +66,83 @@ struct MixedCaptureTests {
         #expect(await empty.generated > 0)
     }
 
+    @Test("a microphone that starts without buffers switches capture backends")
+    func switchesBackendAfterSilentStartup() async throws {
+        try await verifyMicrophoneFallback(stallsAfterStartup: false)
+    }
+
+    @Test("a microphone that stalls switches backends without restarting system audio")
+    func switchesBackendAfterDeviceStall() async throws {
+        try await verifyMicrophoneFallback(stallsAfterStartup: true)
+    }
+
+    @Test("a failed fallback respects the retry limit and manual retry stays on that backend")
+    func boundsFallbackRetries() async throws {
+        let primary = ControlledAudioSource(value: 0.1)
+        primary.paused = true
+        let fallback = ControlledAudioSource(value: 0.3)
+        fallback.paused = true
+        let system = ControlledAudioSource(value: 0.2)
+        let capture = MixedCapture(
+            makeMicrophoneCapture: { primary }, makeMicrophoneRecoveryCapture: { fallback },
+            makeSystemCapture: { system }, policy: fastPolicy)
+        _ = try capture.startBatches(config: .init())
+        defer { capture.stop() }
+        try await waitUntil { capture.sourceHealth.first?.state == .unavailable }
+        #expect(primary.startCount == 1)
+        #expect(fallback.startCount == fastPolicy.maxRecoveryAttempts)
+        #expect(capture.sourceHealth.first?.receivedSamples == 0)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(fallback.startCount == fastPolicy.maxRecoveryAttempts)
+
+        fallback.paused = false
+        capture.retryUnavailableSources()
+        try await waitUntil { capture.sourceHealth.allSatisfy { $0.state == .active } }
+        #expect(primary.startCount == 1)
+        #expect(fallback.startCount == fastPolicy.maxRecoveryAttempts + 1)
+        #expect(system.startCount == 1)
+    }
+
+    private func verifyMicrophoneFallback(stallsAfterStartup: Bool) async throws {
+        let primary = ControlledAudioSource(value: 0.1)
+        primary.paused = !stallsAfterStartup
+        let fallback = ControlledAudioSource(value: 0.3)
+        let system = ControlledAudioSource(value: 0.2)
+        let capture = MixedCapture(
+            makeMicrophoneCapture: { primary },
+            makeMicrophoneRecoveryCapture: { fallback },
+            makeSystemCapture: { system }, policy: fastPolicy)
+        let stream = try capture.startBatches(config: .init(micDeviceUID: "selected-mic"))
+        let collector = ProvenanceCollector()
+        let consumer = Task { for await batch in stream { await collector.append(batch) } }
+        defer { capture.stop() }
+
+        if stallsAfterStartup {
+            try await waitUntil { capture.sourceHealth.allSatisfy { $0.state == .active } }
+            primary.paused = true
+        }
+        try await waitUntil {
+            capture.sourceHealth.contains { $0.source == .microphone && $0.recoveryCount > 0 }
+        }
+        #expect(primary.startCount == 1)
+        #expect(fallback.startCount == 1)
+        #expect(fallback.selectedDeviceUID == "selected-mic")
+        #expect(system.startCount == 1)
+        #expect(capture.sourceHealth.allSatisfy { $0.state == .active })
+
+        // A later outage stays on the independent backend, rather than
+        // returning to the engine whose routing was broken.
+        fallback.paused = true
+        try await waitUntil { fallback.startCount >= 2 }
+        fallback.paused = false
+        try await waitUntil { capture.sourceHealth.allSatisfy { $0.state == .active } }
+        #expect(primary.startCount == 1)
+        #expect(system.startCount == 1)
+        capture.stop()
+        await consumer.value
+        #expect(await collector.captured > 0)
+    }
+
     @Test("system audio keeps flowing when microphone startup succeeds without any buffers")
     func systemAudioSurvivesSilentMicrophone() async throws {
         let microphone = QuietMicrophone()
@@ -154,17 +231,22 @@ private final class ControlledAudioSource: MicrophoneCapturing, SystemCapturing,
     private var continuation: AsyncStream<[Float]>.Continuation?
     private var shouldPause = false
     private var starts = 0
+    private var deviceUID: String?
     private let value: Float
 
     init(value: Float) { self.value = value }
 
     var startCount: Int { lock.withLock { starts } }
+    var selectedDeviceUID: String? { lock.withLock { deviceUID } }
     var paused: Bool {
         get { lock.withLock { shouldPause } }
         set { lock.withLock { shouldPause = newValue } }
     }
 
-    func start(deviceUID: String?) throws -> AsyncStream<[Float]> { try start() }
+    func start(deviceUID: String?) throws -> AsyncStream<[Float]> {
+        lock.withLock { self.deviceUID = deviceUID }
+        return try start()
+    }
 
     func start() throws -> AsyncStream<[Float]> {
         lock.withLock {

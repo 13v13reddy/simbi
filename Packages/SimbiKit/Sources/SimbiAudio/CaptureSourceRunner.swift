@@ -29,6 +29,7 @@ final class CaptureSourceRunner: @unchecked Sendable {
     private let state: OSAllocatedUnfairLock<State>
     private let queue: DispatchQueue
     private let makeHandle: @Sendable () throws -> Handle
+    private let makeRecoveryHandle: (@Sendable () throws -> Handle)?
     private let onSamples: @Sendable ([Float]) -> Void
     // Owned exclusively by the hardware queue.
     private var handle: Handle?
@@ -37,11 +38,13 @@ final class CaptureSourceRunner: @unchecked Sendable {
     init(
         source: RecordingSource, policy: RecordingHealthPolicy,
         makeHandle: @escaping @Sendable () throws -> Handle,
+        makeRecoveryHandle: (@Sendable () throws -> Handle)? = nil,
         onSamples: @escaping @Sendable ([Float]) -> Void
     ) {
         self.source = source
         self.policy = policy
         self.makeHandle = makeHandle
+        self.makeRecoveryHandle = makeRecoveryHandle
         self.onSamples = onSamples
         let now = ProcessInfo.processInfo.systemUptime
         state = OSAllocatedUnfairLock(initialState: State(attemptStarted: now, nextRetry: now))
@@ -120,7 +123,10 @@ final class CaptureSourceRunner: @unchecked Sendable {
         closeHandle()
         guard state.withLock({ $0.active && $0.generation == generation }) else { return }
         do {
-            let opened = try makeHandle()
+            // Once a source needs recovery, stay on its recovery backend
+            // for this session, including manual retries and later outages.
+            let open = generation > 0 ? (makeRecoveryHandle ?? makeHandle) : makeHandle
+            let opened = try open()
             guard state.withLock({ $0.active && $0.generation == generation }) else {
                 opened.stop()
                 return

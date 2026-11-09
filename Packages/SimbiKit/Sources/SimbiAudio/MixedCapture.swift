@@ -29,6 +29,7 @@ public final class MixedCapture: RecordingCapturing, @unchecked Sendable {
     private let queue = DispatchQueue(label: "app.getsimbi.mac.mixing-clock")
     private let queueKey = DispatchSpecificKey<Bool>()
     private let makeMicrophoneCapture: @Sendable () -> any MicrophoneCapturing
+    private let makeMicrophoneRecoveryCapture: @Sendable () -> any MicrophoneCapturing
     private let makeSystemCapture: @Sendable () throws -> any SystemCapturing
     private let policy: RecordingHealthPolicy
     private var mixer: AudioMixer
@@ -41,7 +42,8 @@ public final class MixedCapture: RecordingCapturing, @unchecked Sendable {
 
     public init(
         mixer: AudioMixer = AudioMixer(),
-        makeMicrophoneCapture: @escaping @Sendable () -> any MicrophoneCapturing = { MicCapture() },
+        makeMicrophoneCapture: (@Sendable () -> any MicrophoneCapturing)? = nil,
+        makeMicrophoneRecoveryCapture: (@Sendable () -> any MicrophoneCapturing)? = nil,
         makeSystemCapture: @escaping @Sendable () throws -> any SystemCapturing = {
             guard #available(macOS 14.4, *) else { throw MixedCaptureError.systemAudioUnsupported }
             return SystemAudioCapture()
@@ -49,7 +51,11 @@ public final class MixedCapture: RecordingCapturing, @unchecked Sendable {
         policy: RecordingHealthPolicy = RecordingHealthPolicy()
     ) {
         self.mixer = mixer
-        self.makeMicrophoneCapture = makeMicrophoneCapture
+        self.makeMicrophoneCapture = makeMicrophoneCapture ?? { MicCapture() }
+        // Injected sources keep their own recovery behavior unless an
+        // alternative is supplied; tests never open the machine's real mic.
+        self.makeMicrophoneRecoveryCapture =
+            makeMicrophoneRecoveryCapture ?? makeMicrophoneCapture ?? { CaptureSessionMicrophone() }
         self.makeSystemCapture = makeSystemCapture
         self.policy = policy
         queue.setSpecific(key: queueKey, value: true)
@@ -96,11 +102,18 @@ public final class MixedCapture: RecordingCapturing, @unchecked Sendable {
             emittedSamples = 0
             if config.micEnabled {
                 let makeMicrophone = makeMicrophoneCapture
+                let makeRecoveryMicrophone = makeMicrophoneRecoveryCapture
                 sources.append(
                     CaptureSourceRunner(
                         source: .microphone, policy: policy,
                         makeHandle: {
                             let microphone = makeMicrophone()
+                            let stream = try microphone.start(deviceUID: config.micDeviceUID)
+                            return .init(stream: stream, stop: { microphone.stop() })
+                        },
+                        makeRecoveryHandle: {
+                            RecordingDiagnostics.info("Switching microphone recovery to capture session")
+                            let microphone = makeRecoveryMicrophone()
                             let stream = try microphone.start(deviceUID: config.micDeviceUID)
                             return .init(stream: stream, stop: { microphone.stop() })
                         },
