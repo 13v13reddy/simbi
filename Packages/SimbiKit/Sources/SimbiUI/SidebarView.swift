@@ -15,6 +15,8 @@ struct SidebarView: View {
 
     @State private var renameTarget: FileTreeNode?
     @State private var renameText = ""
+    @State private var search = NoteSearchModel()
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,50 +35,77 @@ struct SidebarView: View {
             .padding(.horizontal, Design.paneInset)
             .padding(.vertical, Design.stripPadding)
 
+            NoteSearchField(search: search, focused: $searchFocused) {
+                if let first = search.results.first { open(first.noteURL, at: nil) }
+            }
+            .padding(.horizontal, Design.stripPadding)
+            .padding(.bottom, Design.stripPadding)
+
             Divider()
 
-            OutlineView(
-                model.nodes,
-                children: \.children,
-                selection: selectedNode
-            ) { node in
-                SidebarCellView(
-                    node: node,
-                    isPinned: model.isPinned(node),
-                    onTogglePin: { model.togglePinned(node.url) },
-                    onDelete: { model.trash(node.url) })
+            if search.isActive {
+                NoteSearchResultsView(search: search, selection: model.selection, open: open)
+            } else {
+                outline
             }
-            .outlineViewStyle(.sourceList)
-            .quietRowSelection()
-            // Folders are containers, not documents: clicking one toggles its
-            // expansion, and the selection only ever points at notes and files.
-            .selectableRows { $0.kind != .folder }
-            .hoverHighlight(color: NSColor(Color.hoverFill), cornerRadius: Design.Radius.row)
-            .dragDataSource { node in
-                let item = NSPasteboardItem()
-                item.setString(node.url.standardizedFileURL.path, forType: .simbiSidebarItem)
-                return item
+        }
+        .onChange(of: model.nodes, initial: true) { _, nodes in
+            search.update(nodes: nodes, root: model.home.rootURL)
+        }
+        .onChange(of: NoteSearchFocus.shared.requests) {
+            searchFocused = true
+        }
+        .alert(
+            "Note Could Not Be Changed",
+            isPresented: Binding(
+                get: { model.operationError != nil },
+                set: { if !$0 { model.clearOperationError() } })
+        ) {
+            Button("OK") { model.clearOperationError() }
+        } message: {
+            Text(model.operationError ?? "")
+        }
+    }
+
+    /// Search results keep showing after a click, so several hits can be
+    /// checked in turn; Esc or the clear button returns to the tree.
+    private func open(_ noteURL: URL, at target: NoteNavigation.Target?) {
+        if let target { NoteNavigation.shared.open(noteURL, at: target) }
+        model.selection = noteURL
+    }
+
+    private var outline: some View {
+        OutlineView(
+            model.nodes,
+            children: \.children,
+            selection: selectedNode
+        ) { node in
+            SidebarCellView(
+                node: node,
+                isPinned: model.isPinned(node),
+                onTogglePin: { model.togglePinned(node.url) },
+                onDelete: { model.trash(node.url) })
+        }
+        .outlineViewStyle(.sourceList)
+        .quietRowSelection()
+        // Folders are containers, not documents: clicking one toggles its
+        // expansion, and the selection only ever points at notes and files.
+        .selectableRows { $0.kind != .folder }
+        .hoverHighlight(color: NSColor(Color.hoverFill), cornerRadius: Design.Radius.row)
+        .dragDataSource { node in
+            let item = NSPasteboardItem()
+            item.setString(node.url.standardizedFileURL.path, forType: .simbiSidebarItem)
+            return item
+        }
+        .onDrop(of: [.simbiSidebarItem], receiver: SidebarDropReceiver(model: model))
+        .contextMenu { node in
+            contextMenu(for: node)
+        }
+        .renameAlert(isPresented: renameAlertPresented, name: $renameText) { name in
+            if let target = renameTarget {
+                model.rename(target.url, to: name)
             }
-            .onDrop(of: [.simbiSidebarItem], receiver: SidebarDropReceiver(model: model))
-            .contextMenu { node in
-                contextMenu(for: node)
-            }
-            .renameAlert(isPresented: renameAlertPresented, name: $renameText) { name in
-                if let target = renameTarget {
-                    model.rename(target.url, to: name)
-                }
-                renameTarget = nil
-            }
-            .alert(
-                "Note Could Not Be Changed",
-                isPresented: Binding(
-                    get: { model.operationError != nil },
-                    set: { if !$0 { model.clearOperationError() } })
-            ) {
-                Button("OK") { model.clearOperationError() }
-            } message: {
-                Text(model.operationError ?? "")
-            }
+            renameTarget = nil
         }
     }
 

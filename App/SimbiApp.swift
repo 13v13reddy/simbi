@@ -39,6 +39,7 @@ struct SimbiApp: App {
                     OnboardingPresenter.shared.present()
                 }
             }
+            NoteSearchCommands()
         }
         // Per-note pipeline inspector (recording debug HUD), opened from
         // the recording header while a session is live.

@@ -175,6 +175,12 @@ struct NoteView: View {
             if summary.summaryExists && recorder.status == .idle {
                 selectedTab = .aiNotes
             }
+            // After the default tab choice, so a search hit can override it.
+            applyNavigation()
+        }
+        // A search hit in the note that is already open.
+        .onChange(of: NoteNavigation.shared.request) {
+            applyNavigation()
         }
         // Starting a recording silences playback (speakers → mic feedback)
         // and forces My Notes — that's where live note-taking happens.
@@ -357,6 +363,27 @@ struct NoteView: View {
         }
         if !recorder.status.isCapturing && playback.hasAudio && !importer.decodingAudio {
             playback.play(from: seconds)
+        }
+    }
+
+    /// Lands on a search hit: the matching tab, or the transcript cue.
+    private func applyNavigation() {
+        guard let target = NoteNavigation.shared.take(for: noteFolderURL) else { return }
+        switch target {
+        case .myNotes:
+            selectedTab = .myNotes
+        case .aiNotes:
+            if summary.summaryExists { selectedTab = .aiNotes }
+        case .transcript(let seconds):
+            guard let entries = transcript.document?.entries,
+                let row = TimestampLink.cueEntryIndex(for: seconds, in: entries)
+            else { return }
+            // A just-built note's transcript list needs one layout pass
+            // before it can scroll to a row.
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(150))
+                transcriptFlash = CueFlash(row: row)
+            }
         }
     }
 
