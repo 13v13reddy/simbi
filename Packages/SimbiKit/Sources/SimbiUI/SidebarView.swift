@@ -52,6 +52,9 @@ struct SidebarView: View {
         .onChange(of: model.nodes, initial: true) { _, nodes in
             search.update(nodes: nodes, root: model.home.rootURL)
         }
+        .onChange(of: model.contentRevision) {
+            search.contentChanged()
+        }
         .onChange(of: NoteSearchFocus.shared.requests) {
             searchFocused = true
         }

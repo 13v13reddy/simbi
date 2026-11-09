@@ -21,6 +21,9 @@ public final class FileTreeModel {
         }
     }
     public private(set) var bootstrapError: Error?
+    /// Bumped on every change below the notes folder, including edits to
+    /// file contents that leave the tree itself unchanged.
+    public private(set) var contentRevision = 0
     public private(set) var operationError: String?
 
     private var watcher: FileTreeWatcher?
@@ -51,6 +54,7 @@ public final class FileTreeModel {
         refresh()
 
         watcher = FileTreeWatcher.observing(url: home.rootURL) { [weak self] in
+            self?.contentRevision += 1
             self?.refresh()
         }
     }

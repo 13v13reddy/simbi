@@ -20,6 +20,8 @@ final class NoteSearchModel {
     private var notes: [URL] = []
     private var root: URL?
     private var task: Task<Void, Never>?
+    /// True while a search is scheduled or running (not yet delivered).
+    private var pending = false
 
     var isActive: Bool { !NoteSearch.terms(in: query).isEmpty }
 
@@ -32,16 +34,27 @@ final class NoteSearchModel {
 
     func clear() { query = "" }
 
-    private func schedule(after delay: Duration) {
+    /// A file inside the notes folder changed (an edit, new transcript
+    /// lines). Refreshes open results at most about once a second and
+    /// without the "searching" dimming, so a live recording cannot make the
+    /// list flicker or keep postponing the refresh.
+    func contentChanged() {
+        guard isActive, !pending else { return }
+        schedule(after: .seconds(1), showsProgress: false)
+    }
+
+    private func schedule(after delay: Duration, showsProgress: Bool = true) {
         task?.cancel()
         guard isActive, let root else {
             task = nil
+            pending = false
             results = []
             resultTerms = []
             isSearching = false
             return
         }
-        isSearching = true
+        pending = true
+        if showsProgress { isSearching = true }
         let query = query
         let notes = notes
         task = Task { [weak self] in
@@ -51,6 +64,7 @@ final class NoteSearchModel {
             results = found
             resultTerms = NoteSearch.terms(in: query)
             isSearching = false
+            pending = false
         }
     }
 
