@@ -64,7 +64,9 @@ public final class ImportController {
         self.noteFolderURL = noteFolderURL
         self.pipeline = ImportPipeline(
             noteFolderURL: noteFolderURL,
-            transcriber: CodexTranscriber(),
+            transcriber: CodexTranscriber(refreshAuthentication: {
+                try await CodexServices.appServer.refreshAuthentication()
+            }),
             decoder: MediaFileDecoder(),
             analyzer: OfflineSpeechAnalyzer(), outbox: .shared(noteFolderURL: noteFolderURL))
         recoverLeftoverImportIfNeeded()

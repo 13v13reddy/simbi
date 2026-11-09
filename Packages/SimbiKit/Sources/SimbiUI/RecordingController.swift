@@ -213,7 +213,10 @@ public final class RecordingController {
         self.init(
             noteFolderURL: noteFolderURL,
             pipeline: RecordingPipeline(
-                noteFolderURL: noteFolderURL, transcriber: CodexTranscriber(), diarizer: SortformerStream(),
+                noteFolderURL: noteFolderURL,
+                transcriber: CodexTranscriber(refreshAuthentication: {
+                    try await CodexServices.appServer.refreshAuthentication()
+                }), diarizer: SortformerStream(),
                 outbox: .shared(noteFolderURL: noteFolderURL)),
             makeCapture: { MixedCapture() },
             requestMicrophoneAccess: { await AVCaptureDevice.requestAccess(for: .audio) },

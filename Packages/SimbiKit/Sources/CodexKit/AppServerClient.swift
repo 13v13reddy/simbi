@@ -418,6 +418,13 @@ public actor AppServerClient {
         pending.removeValue(forKey: id)?.resume(throwing: error)
     }
 
+    /// Asks Codex to renew the ChatGPT login (`account/read` with
+    /// `refreshToken`), which rewrites `~/.codex/auth.json` in managed auth
+    /// mode. Transcription reads its token from that file.
+    public func refreshAuthentication() async throws {
+        _ = try await request(method: "account/read", params: ["refreshToken": true])
+    }
+
     /// Public request entry: starts/restarts the server as needed. Returns
     /// the raw JSON of the response's `result`.
     @discardableResult

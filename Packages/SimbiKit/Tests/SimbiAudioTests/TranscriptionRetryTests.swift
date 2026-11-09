@@ -117,6 +117,36 @@ struct TranscriptionRetryTests {
         let text = try String(contentsOf: VTT.fileURL(noteFolder: note), encoding: .utf8)
         #expect(text.contains("Recovered transcription"))
     }
+
+    @Test("an expired login is renewed once and the upload retried")
+    func renewsExpiredLogin() async throws {
+        let file = FileManager.default.temporaryDirectory.appending(path: "segment-\(UUID()).webm")
+        try Data([1, 2, 3]).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let state = LoginState()
+        let transcriber = CodexTranscriber(
+            upload: { _ in try await state.upload() }, refreshAuthentication: { await state.renew() })
+        #expect(try await transcriber.transcribe(webmFile: file) == "after renewal")
+        #expect(await state.renewals == 1)
+        #expect(await state.uploads == 2)
+
+        // Without a way to renew, the rejection still pauses the queue as before.
+        let unrenewable = CodexTranscriber(upload: { _ in try await LoginState().upload() }, refreshAuthentication: nil)
+        await #expect(throws: TranscriptionClient.TranscriptionError.authRejected(status: 401)) {
+            try await unrenewable.transcribe(webmFile: file)
+        }
+    }
+}
+
+private actor LoginState {
+    private(set) var renewals = 0
+    private(set) var uploads = 0
+    func renew() { renewals += 1 }
+    func upload() throws -> String {
+        uploads += 1
+        guard renewals > 0 else { throw TranscriptionClient.TranscriptionError.authRejected(status: 401) }
+        return "after renewal"
+    }
 }
 
 private actor RetryTranscriber: Transcriber {
