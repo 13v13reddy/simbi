@@ -21,15 +21,18 @@ enum SimbiCodexDesktopProjectCatalog {
         else { return nil }
 
         let rootPath = rootURL.standardizedFileURL.path
-        guard let (desktopID, _) = projects.first(where: { _, project in
-            let roots = project["rootPaths"] as? [String] ?? []
-            return roots.contains {
-                URL(filePath: $0).standardizedFileURL.path == rootPath
-            }
-        }) else { return nil }
+        guard
+            let (desktopID, _) = projects.first(where: { _, project in
+                let roots = project["rootPaths"] as? [String] ?? []
+                return roots.contains {
+                    URL(filePath: $0).standardizedFileURL.path == rootPath
+                }
+            })
+        else { return nil }
 
         let hostKey = "local:\(codexHomeURL.standardizedFileURL.path)"
-        let mappings = object["app-server-project-id-by-legacy-project-id-by-host"]
+        let mappings =
+            object["app-server-project-id-by-legacy-project-id-by-host"]
             as? [String: [String: String]]
         return Project(desktopID: desktopID, serverID: mappings?[hostKey]?[desktopID])
     }
