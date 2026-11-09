@@ -189,7 +189,7 @@ public final class RecordingController {
     private let activity: RecordingActivity
     private let enableFixer: Bool
     private let persistSourcePreferences: Bool
-    /// Whole-recording speaker pass run after Stop, before AI notes.
+    /// Post-Stop speaker pass (the local voice on calls), before AI notes.
     private let relabelSpeakers: (@Sendable (URL) async -> Void)?
     private var healthTask: Task<Void, Never>?
     private var preparationDeadline: Task<Void, Never>?
@@ -220,7 +220,7 @@ public final class RecordingController {
             notifier: RecordingNotifications.shared, enableFixer: true, persistSourcePreferences: true,
             relabelSpeakers: { noteFolderURL in
                 do {
-                    let changed = try await SpeakerRelabeler().relabel(
+                    let changed = try SpeakerRelabeler.relabel(
                         noteFolderURL: noteFolderURL, outbox: .shared(noteFolderURL: noteFolderURL))
                     Log.recording.info("speaker relabel updated \(changed) cues")
                 } catch {

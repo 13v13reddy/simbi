@@ -259,7 +259,10 @@ struct TranscriptView: View {
                             get: { renameTarget?.row == row ? renameTarget : nil },
                             set: { if $0 == nil { renameTarget = nil } })
                     ) { target in
-                        renamePopover(target: target)
+                        renamePopover(
+                            target: target,
+                            others: speakerSlots.keys.filter { $0 != target.name }
+                                .sorted { $0.localizedStandardCompare($1) == .orderedAscending })
                     }
                     Button {
                         onSeek?(start)
@@ -341,10 +344,27 @@ struct TranscriptView: View {
             .frame(maxWidth: .infinity)
     }
 
-    private func renamePopover(target: RenameTarget) -> some View {
+    /// Rename, or merge into another speaker when speaker detection filed one
+    /// person under two names.
+    private func renamePopover(target: RenameTarget, others: [String]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Rename \(target.name) everywhere")
                 .font(.body.weight(.semibold))
+            if !others.isEmpty {
+                VStack(alignment: .leading, spacing: Design.innerGap) {
+                    Text("Same person as")
+                        .font(.meta)
+                        .foregroundStyle(.secondary)
+                    ForEach(others, id: \.self) { other in
+                        Button(other) {
+                            onRenameSpeaker?(target.name, other)
+                            renameTarget = nil
+                        }
+                        .buttonStyle(.link)
+                        .help("Merge \(target.name) into \(other) across the transcript")
+                    }
+                }
+            }
             TextField("Name", text: $renameText)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 200)

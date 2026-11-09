@@ -83,4 +83,17 @@ struct SpeakerRenameTests {
         #expect(text.contains("<v Bob Park>Hi!"))
         _ = try VTTParser.parse(text)
     }
+
+    @Test("renaming into an existing speaker merges the two")
+    func mergeIntoExisting() throws {
+        var transcript = VTT.header(noteName: "n")
+        transcript += VTT.render(.cue(index: 1, start: 0, end: 1, speaker: "Speaker 1", text: "a", continuation: false))
+        transcript += VTT.render(.cue(index: 2, start: 1, end: 2, speaker: "Speaker 3", text: "b", continuation: false))
+        let merged = try SpeakerRename.rename(transcript: transcript, from: "Speaker 3", to: "Speaker 1")
+        let speakers = try VTTParser.parse(merged).entries.compactMap { entry -> String? in
+            if case .cue(_, _, _, let speaker, _, _) = entry { return speaker }
+            return nil
+        }
+        #expect(speakers == ["Speaker 1", "Speaker 1"])
+    }
 }
