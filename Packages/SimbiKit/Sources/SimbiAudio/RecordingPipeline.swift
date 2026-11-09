@@ -69,6 +69,15 @@ public actor RecordingPipeline: TranscriptFixerHost {
     private static let uploadMaxAttempts = 3
     private static let uploadBackoff: [Duration] = [.seconds(1), .seconds(4)]
     private static let authRetryDelay: Duration = .seconds(30)
+    /// After bounded retries fail (typically a network drop), failed cues
+    /// retry by themselves on this schedule (about 19 minutes in total);
+    /// any successful upload restarts it. Retry stays available meanwhile.
+    public static let defaultAutoRetryDelays: [Duration] = [
+        .seconds(15), .seconds(30), .seconds(60), .seconds(120), .seconds(300), .seconds(600),
+    ]
+    private let autoRetryDelays: [Duration]
+    private var autoRetryTask: Task<Void, Never>?
+    private var autoRetryRound = 0
 
     private var liveContinuation: AsyncStream<RecordingLiveUpdate>.Continuation?
     /// Inspector tap (spec 2026-07-22): with no subscriber every hook is
@@ -97,9 +106,11 @@ public actor RecordingPipeline: TranscriptFixerHost {
         vad: VadStream = SileroVadStream(),
         makeEncoder: @escaping @Sendable (URL, OpusWebMEncoder.Mode) throws -> any RecordingAudioWriting = {
             try OpusWebMEncoder(fileURL: $0, mode: $1)
-        }, outbox: TranscriptOutbox? = nil
+        }, outbox: TranscriptOutbox? = nil,
+        autoRetryDelays: [Duration] = RecordingPipeline.defaultAutoRetryDelays
     ) {
         self.noteFolderURL = noteFolderURL
+        self.autoRetryDelays = autoRetryDelays
         self.transcriber = transcriber
         self.diarizer = diarizer
         self.vad = vad
@@ -805,6 +816,24 @@ extension RecordingPipeline {
         RecordingDiagnostics.error("cue \(cueIndex) transcription failed after bounded retries; audio retained")
         kickUploads()
         emitInspectorUpdate()
+        scheduleAutoRetry()
+    }
+
+    private func scheduleAutoRetry() {
+        guard autoRetryTask == nil, autoRetryRound < autoRetryDelays.count else { return }
+        let delay = autoRetryDelays[autoRetryRound]
+        autoRetryRound += 1
+        autoRetryTask = Task { [weak self] in
+            do { try await Task.sleep(for: delay) } catch { return }
+            await self?.runAutoRetry()
+        }
+    }
+
+    private func runAutoRetry() {
+        autoRetryTask = nil
+        guard transcriptionFailed else { return }
+        RecordingDiagnostics.info("retrying failed transcriptions automatically")
+        retryTranscription()
     }
 
     private func markTranscriptionFailure(_ cueIndex: Int) {
@@ -818,6 +847,7 @@ extension RecordingPipeline {
 
     private func uploadFinished(cueIndex: Int, text: String) {
         failedUploads.remove(cueIndex)
+        autoRetryRound = 0
         do {
             try outbox.fulfillCue(index: cueIndex, text: text)
             if FileManager.default.fileExists(atPath: pendingDirURL.appending(path: "\(cueIndex).json").path) {

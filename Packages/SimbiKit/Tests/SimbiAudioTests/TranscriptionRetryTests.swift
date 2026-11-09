@@ -85,6 +85,38 @@ struct TranscriptionRetryTests {
         #expect(await !pipeline.transcriptionFailed)
         #expect(await transcriber.calls == 2)
     }
+
+    @Test("failed uploads retry by themselves once the connection returns")
+    func retriesAutomatically() async throws {
+        let note = FileManager.default.temporaryDirectory.appending(path: "transcription-auto-\(UUID())")
+        try FileManager.default.createDirectory(at: note, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: note) }
+        let transcriber = RetryTranscriber()
+        let pipeline = RecordingPipeline(
+            noteFolderURL: note, transcriber: transcriber,
+            diarizer: FakeDiarizer { _ in .speech(slot: 0) }, vad: FakeVad { _ in true },
+            autoRetryDelays: [.milliseconds(300)])
+        try await pipeline.start()
+        try await pipeline.ingest(samples: [Float](repeating: 0.1, count: 32_000))
+        try await pipeline.stop(runFixer: false)
+        for _ in 0..<800 {
+            if await pipeline.transcriptionFailed { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await pipeline.transcriptionFailed)
+        #expect(await transcriber.calls == 3)
+        // The network comes back; nobody presses Retry.
+        await transcriber.succeed()
+        for _ in 0..<300 {
+            if await pipeline.isTranscriptDrained { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await pipeline.isTranscriptDrained)
+        #expect(await !pipeline.transcriptionFailed)
+        #expect(await transcriber.calls == 4)
+        let text = try String(contentsOf: VTT.fileURL(noteFolder: note), encoding: .utf8)
+        #expect(text.contains("Recovered transcription"))
+    }
 }
 
 private actor RetryTranscriber: Transcriber {
